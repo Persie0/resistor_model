@@ -121,3 +121,21 @@ def test_import_dataset_groups_timestamped_named_captures_but_not_generic_error_
     assert rows[named_a]["session_id"] == "1k-5"
     assert rows[named_b]["session_id"] == "1k-5"
     assert rows[error_a]["session_id"] != rows[error_b]["session_id"]
+
+
+def test_import_dataset_groups_numbered_capture_families(tmp_path: Path):
+    (tmp_path / "data.yaml").write_text(
+        "nc: 3\nnames: ['black', 'grey', 'resistor symbol']\n", encoding="utf-8"
+    )
+    first = "100R_1-4W_-60-_jpg.rf.aaaaaaaa.jpg"
+    second = "100R_1-4W_-36-_jpg.rf.bbbbbbbb.jpg"
+    for filename in (first, second):
+        _write_sample(tmp_path, "train", filename)
+
+    output = tmp_path / "manifest.jsonl"
+    import_dataset(tmp_path, output, min_bands=3, max_bands=6)
+    rows = {Path(row["image"]).name: row for row in map(json.loads, output.read_text(encoding="utf-8").splitlines())}
+
+    assert rows[first]["resistors"][0]["id"] != rows[second]["resistors"][0]["id"]
+    assert rows[first]["session_id"] == "100R_1-4W"
+    assert rows[second]["session_id"] == "100R_1-4W"
