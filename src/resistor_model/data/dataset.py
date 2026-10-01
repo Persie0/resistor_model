@@ -38,6 +38,12 @@ class ResistorBandDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def reseed_augmenters(self, seed: int) -> None:
+        """Give each DataLoader worker independent, reproducible augmentation streams."""
+        seed = int(seed)
+        self.augmenter.reseed(seed)
+        self.augmenter2.reseed(seed + 100003)
+
     def _targets(self, bands: list[dict], width: int) -> dict[str, torch.Tensor]:
         ordered = sorted(bands, key=lambda b: (b["bbox"][0] + b["bbox"][2]) * 0.5)
         if len(ordered) > self.max_bands: raise ValueError(f"sample has {len(ordered)} bands but max_bands={self.max_bands}")
