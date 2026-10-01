@@ -27,6 +27,7 @@ resistor-export = "resistor_model.export:main"
 resistor-audit = "resistor_model.tools.audit_dataset:main"
 resistor-split = "resistor_model.tools.make_splits:main"
 resistor-convert-yolo = "resistor_model.tools.convert_yolo:main"
+resistor-import-roboflow = "resistor_model.tools.import_roboflow_yolo:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
