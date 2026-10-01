@@ -125,6 +125,7 @@ def prepare_dataset() -> None:
         "--output", str(splits),
         "--ratios", "0.70", "0.15", "0.15",
         "--seed", str(SEED),
+        "--group-session",
     ])
 
 
@@ -140,7 +141,7 @@ def write_config() -> None:
             "output_size": [OUTPUT_HEIGHT, OUTPUT_WIDTH],
             "sequence_bins": SEQUENCE_BINS,
             "num_workers": 2,
-            "group_session": False,
+            "group_session": True,
             "split_ratios": [0.70, 0.15, 0.15],
         },
         "model": {
