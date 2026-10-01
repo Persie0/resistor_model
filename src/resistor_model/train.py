@@ -66,6 +66,17 @@ def _restore_scaler_state(scaler, checkpoint: dict) -> None:
         scaler.load_state_dict(state)
 
 
+def _advance_scheduler_for_checkpoint(scheduler) -> dict:
+    """Advance to the next-epoch LR and return the state that must be checkpointed.
+
+    Checkpoints are written at the end of an epoch. Advancing before serializing
+    both scheduler and optimizer state ensures a resumed run begins with exactly
+    the same learning rate as an uninterrupted run.
+    """
+    scheduler.step()
+    return scheduler.state_dict()
+
+
 def _to_device(batch: dict, device: torch.device) -> dict:
     return {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
@@ -212,13 +223,17 @@ def main() -> None:
         is_best = current_key > best_key
         if is_best:
             best_key = current_key
+
+        # Advance first so both the optimizer LR and scheduler state represent
+        # the start of the next epoch when this checkpoint is resumed.
+        scheduler_state = _advance_scheduler_for_checkpoint(scheduler)
         checkpoint = {
             "epoch": epoch,
             "config": cfg,
             "model_state": ema.model.state_dict(),
             "raw_model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": scheduler.state_dict(),
+            "scheduler_state": scheduler_state,
             "scaler_state": scaler.state_dict(),
             "best_exact_sequence": best_key[0],
             "best_macro_f1": best_key[1],
@@ -228,7 +243,6 @@ def main() -> None:
         torch.save(checkpoint, out_dir / "last.pt")
         if is_best:
             torch.save(checkpoint, out_dir / "best.pt")
-        scheduler.step()
         record = {"epoch": epoch, "seconds": time.time() - t0, "lr": lr_used, "train": train_metrics, "val": val_metrics}
         with (out_dir / "metrics.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
