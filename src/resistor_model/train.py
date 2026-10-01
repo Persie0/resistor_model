@@ -46,6 +46,14 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _seed_dataset_worker(worker_id: int) -> None:
+    """Give every worker an independent deterministic augmentation RNG stream."""
+    del worker_id  # worker_info.seed already includes the worker id.
+    info = torch.utils.data.get_worker_info()
+    if info is not None and hasattr(info.dataset, "reseed_augmenters"):
+        info.dataset.reseed_augmenters(int(info.seed))
+
+
 def _to_device(batch: dict, device: torch.device) -> dict:
     return {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
@@ -74,7 +82,7 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         raise ValueError("validation split is empty; provide more resistor IDs or explicit splits")
     kwargs = dict(batch_size=int(cfg["train"]["batch_size"]), num_workers=int(d["num_workers"]), pin_memory=torch.cuda.is_available())
     generator = torch.Generator().manual_seed(int(cfg["seed"]))
-    train_loader = DataLoader(train_ds, shuffle=True, drop_last=False, generator=generator, **kwargs)
+    train_loader = DataLoader(train_ds, shuffle=True, drop_last=False, generator=generator, worker_init_fn=_seed_dataset_worker, **kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, drop_last=False, **kwargs)
     return train_loader, val_loader
 
