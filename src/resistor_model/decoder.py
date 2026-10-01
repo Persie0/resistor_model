@@ -15,6 +15,8 @@ class DecodeResult:
     ohms: float | None = None
     tolerance_percent: float | None = None
     tempco_ppm: float | None = None
+    ambiguous: bool = False
+    candidates: tuple["DecodeResult", ...] = ()
 
 
 def _decode_one(colors: list[str]) -> DecodeResult:
@@ -49,9 +51,31 @@ def _decode_one(colors: list[str]) -> DecodeResult:
     return DecodeResult(True, colors, significant * MULTIPLIER[multiplier], tolerance_percent, tempco)
 
 
+def _electrical_key(result: DecodeResult) -> tuple[float | None, float | None, float | None]:
+    return result.ohms, result.tolerance_percent, result.tempco_ppm
+
+
 def decode_resistor(spatial_colors: list[str]) -> DecodeResult:
-    forward = _decode_one(list(spatial_colors))
-    reverse = _decode_one(list(reversed(spatial_colors)))
+    """Decode a spatial band sequence without inventing a reading direction.
+
+    Resistor color grammar alone does not always determine which end is the
+    first significant digit. If both directions are electrically valid and
+    imply different values, return an explicit ambiguous result containing
+    both candidates instead of silently preferring left-to-right.
+    """
+    spatial = [str(c).lower() for c in spatial_colors]
+    forward = _decode_one(spatial)
+    reverse = _decode_one(list(reversed(spatial)))
+
+    if forward.valid and reverse.valid:
+        if _electrical_key(forward) == _electrical_key(reverse):
+            return forward
+        return DecodeResult(
+            valid=False,
+            colors=spatial,
+            ambiguous=True,
+            candidates=(forward, reverse),
+        )
     if forward.valid:
         return forward
     if reverse.valid:
