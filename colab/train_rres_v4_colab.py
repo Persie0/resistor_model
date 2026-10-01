@@ -2,12 +2,14 @@
 
 Usage in Colab:
 1. Runtime -> Change runtime type -> GPU.
-2. Download/open this file, then run:
-      %run /content/train_rres_v4_colab.py
-   or paste it into a Colab cell.
-3. Paste a GitHub token with read access to Persie0/resistor_scanner when prompted.
+2. Run this script/notebook.
+3. Authorize Google Drive when prompted.
+4. Paste a GitHub token with read access to Persie0/resistor_scanner.
 
-The token is requested with getpass and is never written to disk or printed.
+Training outputs are stored in Google Drive under
+``MyDrive/resistor_model/rres-v4-colab``. If ``last.pt`` already exists there,
+training automatically resumes from the next epoch. The GitHub token is
+requested with getpass and is never written to disk or printed.
 """
 
 from __future__ import annotations
@@ -40,13 +42,14 @@ SEED = 42
 WORK = Path("/content/resistor_training")
 MODEL_REPO = WORK / "resistor_model"
 DATA_ROOT = WORK / "rres_v4"
-RUN_DIR = WORK / "runs" / "rres-v4-colab"
+DRIVE_MOUNT = Path("/content/drive")
+RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "rres-v4-colab"
 CONFIG_PATH = WORK / "rres-v4-colab.yaml"
 ZIP_PATH = WORK / "resistor-bandnet-rres-v4-colab.zip"
 
 
 def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
-    print("+", " ".join(cmd))
+    print("+", " ".join(cmd), flush=True)
     result = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
@@ -57,17 +60,41 @@ def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> st
     )
     if capture:
         assert result.stdout is not None
-        print(result.stdout)
+        print(result.stdout, flush=True)
         return result.stdout
     return ""
 
 
 def require_gpu() -> None:
     try:
-        out = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], text=True).strip()
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            text=True,
+        ).strip()
     except Exception as exc:
-        raise RuntimeError("No NVIDIA GPU detected. In Colab choose Runtime -> Change runtime type -> GPU.") from exc
-    print("GPU:", out)
+        raise RuntimeError(
+            "No NVIDIA GPU detected. In Colab choose Runtime -> Change runtime type -> GPU."
+        ) from exc
+    print("GPU:", out, flush=True)
+
+
+def mount_drive() -> None:
+    try:
+        from google.colab import drive
+    except ImportError as exc:
+        raise RuntimeError("Google Drive persistence requires running this script in Google Colab.") from exc
+
+    drive.mount(str(DRIVE_MOUNT), force_remount=False)
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Persistent run directory: {RUN_DIR}", flush=True)
+
+
+def find_resume_checkpoint(run_dir: Path) -> Path | None:
+    """Return a usable latest checkpoint from persistent storage, if present."""
+    checkpoint = Path(run_dir) / "last.pt"
+    if checkpoint.is_file() and checkpoint.stat().st_size > 0:
+        return checkpoint
+    return None
 
 
 def clone_training_repo() -> None:
@@ -88,6 +115,7 @@ def install_dependencies() -> None:
 
 
 def download_private_dataset(token: str) -> None:
+    # Keep the image corpus on local Colab storage for training throughput.
     if DATA_ROOT.exists():
         shutil.rmtree(DATA_ROOT)
     DATA_ROOT.mkdir(parents=True)
@@ -101,10 +129,10 @@ def download_private_dataset(token: str) -> None:
             "User-Agent": "resistor-model-colab",
         },
     )
-    print("Downloading private annotated dataset...")
+    print("Downloading private annotated dataset...", flush=True)
     with urllib.request.urlopen(request) as response, zip_path.open("wb") as dst:
         shutil.copyfileobj(response, dst)
-    print(f"Downloaded {zip_path.stat().st_size / 1024 / 1024:.1f} MiB")
+    print(f"Downloaded {zip_path.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
     shutil.unpack_archive(zip_path, DATA_ROOT)
 
 
@@ -128,10 +156,9 @@ def prepare_dataset() -> None:
     ])
 
 
-def write_config() -> None:
-    import yaml
-
-    cfg = {
+def build_config(run_dir: Path, resume: Path | None) -> dict:
+    """Build the training config with persistent output/resume paths."""
+    return {
         "seed": SEED,
         "data": {
             "manifest": str(DATA_ROOT / "manifest.jsonl"),
@@ -163,8 +190,8 @@ def write_config() -> None:
             "grad_clip": 1.0,
             "amp": True,
             "ema_decay": 0.999,
-            "output_dir": str(RUN_DIR),
-            "resume": None,
+            "output_dir": str(run_dir),
+            "resume": str(resume) if resume is not None else None,
         },
         "loss": {
             "dense": 1.0,
@@ -178,15 +205,31 @@ def write_config() -> None:
             "body_class_weight": 0.25,
         },
     }
-    CONFIG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    print(CONFIG_PATH.read_text())
+
+
+def write_config() -> None:
+    import yaml
+
+    resume = find_resume_checkpoint(RUN_DIR)
+    if resume is None:
+        print("No Drive checkpoint found; starting a fresh training run.", flush=True)
+    else:
+        print(f"Resuming from persistent checkpoint: {resume}", flush=True)
+
+    cfg = build_config(RUN_DIR, resume)
+    text = yaml.safe_dump(cfg, sort_keys=False)
+    CONFIG_PATH.write_text(text, encoding="utf-8")
+    # Keep the resolved recipe next to the checkpoints for reproducibility.
+    (RUN_DIR / "resolved_config.yaml").write_text(text, encoding="utf-8")
+    print(text, flush=True)
 
 
 def train_and_evaluate() -> None:
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     # Tests are short and catch accidental branch/API drift before a long GPU run.
     run([sys.executable, "-m", "pytest", "-q"], cwd=MODEL_REPO)
-    run([sys.executable, "-m", "resistor_model.train", "--config", str(CONFIG_PATH)])
+    # Training stdout is inherited, so flushed batch/epoch progress appears live in Colab.
+    run([sys.executable, "-u", "-m", "resistor_model.train", "--config", str(CONFIG_PATH)])
 
     test_output = run([
         sys.executable, "-m", "resistor_model.evaluate",
@@ -206,16 +249,22 @@ def train_and_evaluate() -> None:
 
 def summarize() -> None:
     metrics_path = RUN_DIR / "metrics.jsonl"
-    rows = [json.loads(line) for line in metrics_path.read_text().splitlines() if line.strip()]
+    raw_rows = [json.loads(line) for line in metrics_path.read_text().splitlines() if line.strip()]
+    # If a user manually reruns from an older checkpoint, keep the newest record per epoch.
+    rows_by_epoch = {int(row["epoch"]): row for row in raw_rows}
+    rows = [rows_by_epoch[key] for key in sorted(rows_by_epoch)]
+    if not rows:
+        raise RuntimeError(f"No training metrics found in {metrics_path}")
     best = max(rows, key=lambda r: (r["val"]["exact_sequence_accuracy"], r["val"]["macro_f1"]))
     summary = {
         "epochs": len(rows),
         "best_epoch": best["epoch"],
         "best_validation": best["val"],
         "last_validation": rows[-1]["val"],
+        "persistent_run_dir": str(RUN_DIR),
     }
     (RUN_DIR / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2), flush=True)
 
 
 def package_and_download() -> None:
@@ -223,16 +272,17 @@ def package_and_download() -> None:
         ZIP_PATH.unlink()
     archive_base = ZIP_PATH.with_suffix("")
     shutil.make_archive(str(archive_base), "zip", root_dir=RUN_DIR)
-    print(f"Created {ZIP_PATH} ({ZIP_PATH.stat().st_size / 1024 / 1024:.1f} MiB)")
+    print(f"Created {ZIP_PATH} ({ZIP_PATH.stat().st_size / 1024 / 1024:.1f} MiB)", flush=True)
     try:
         from google.colab import files
         files.download(str(ZIP_PATH))
     except Exception:
-        print("Not running in Colab; output remains at", ZIP_PATH)
+        print("Output remains persistently available at", RUN_DIR, flush=True)
 
 
 def main() -> None:
     require_gpu()
+    mount_drive()
     token = getpass.getpass("GitHub token with READ access to Persie0/resistor_scanner: ").strip()
     if not token:
         raise RuntimeError("A GitHub token is required because resistor_scanner is private.")
