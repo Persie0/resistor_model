@@ -20,6 +20,11 @@ _CLASS_ALIASES = {
     "resistor_symbol": "resistor symbol",
 }
 _ROBOFLOW_SUFFIX = re.compile(r"\.rf\.[0-9a-f]+$", re.IGNORECASE)
+_CAPTURE_STAMP = re.compile(
+    r"^(?P<prefix>.+?)_(?P<timestamp>20\d{12})_(?P<tail>\d+)(?:_(?:jpg|jpeg|png|webp|bmp))?$",
+    re.IGNORECASE,
+)
+_GENERIC_CAPTURE_PREFIXES = {"batch", "error"}
 
 
 def canonical_class_name(name: str) -> str:
@@ -30,6 +35,26 @@ def canonical_class_name(name: str) -> str:
 def roboflow_source_id(image_path: str | Path) -> str:
     stem = Path(image_path).stem
     return _ROBOFLOW_SUFFIX.sub("", stem)
+
+
+def roboflow_capture_group_id(image_path: str | Path) -> str:
+    """Return a conservative repeated-capture group for split isolation.
+
+    Named captures in rres.v4 use forms such as
+    ``1k-5-_20251215140233_4900_jpg``. Those captures may show the same
+    component/setup and therefore must not be independently scattered across
+    train/validation/test. Generic recorder names such as ``batch`` or
+    ``Error`` are deliberately not collapsed because they do not identify a
+    resistor family/component.
+    """
+    source_id = roboflow_source_id(image_path)
+    match = _CAPTURE_STAMP.match(source_id)
+    if match is None:
+        return source_id
+    prefix = match.group("prefix").rstrip("_- ")
+    if not prefix or prefix.lower() in _GENERIC_CAPTURE_PREFIXES:
+        return source_id
+    return prefix
 
 
 def _bbox_from_yolo_fields(fields: list[float], width: int, height: int) -> list[float]:
@@ -199,6 +224,7 @@ def import_dataset(
     stats: Counter[str] = Counter()
     per_band_count: Counter[int] = Counter()
     source_occurrences: Counter[str] = Counter()
+    capture_occurrences: Counter[str] = Counter()
     rows: list[dict] = []
 
     for original_split, image_path, label_path in _iter_split_images(dataset_root):
@@ -239,7 +265,9 @@ def import_dataset(
             continue
 
         source_id = roboflow_source_id(image_path)
+        capture_group = roboflow_capture_group_id(image_path)
         source_occurrences[source_id] += 1
+        capture_occurrences[capture_group] += 1
         resistors = []
         for body, group_bands in groups:
             body_bbox = _body_bbox(body) if body is not None else None
@@ -257,7 +285,7 @@ def import_dataset(
 
         rows.append({
             "image": image_path.relative_to(dataset_root).as_posix(),
-            "session_id": source_id,
+            "session_id": capture_group,
             "camera_id": None,
             "split": None,
             "source_split": original_split,
@@ -267,6 +295,8 @@ def import_dataset(
 
     stats["source_groups"] = len(source_occurrences)
     stats["source_groups_with_multiple_exports"] = sum(v > 1 for v in source_occurrences.values())
+    stats["capture_groups"] = len(capture_occurrences)
+    stats["capture_groups_with_multiple_images"] = sum(v > 1 for v in capture_occurrences.values())
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as fh:
         for row in rows:
