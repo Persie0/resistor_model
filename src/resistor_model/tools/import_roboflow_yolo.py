@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -60,7 +60,24 @@ def parse_yolo_label_line(line: str, class_names: list[str], width: int, height:
     x1, y1, x2, y2 = bbox
     if x2 <= x1 or y2 <= y1:
         raise ValueError(f"degenerate annotation bbox: {bbox}")
-    return {"name": canonical_class_name(class_names[class_id]), "bbox": bbox}
+    if len(fields) == 4:
+        polygon = None
+        annotation_type = "box"
+    else:
+        polygon = [[fields[i] * width, fields[i + 1] * height] for i in range(0, len(fields), 2)]
+        if len(polygon) > 3 and polygon[0] == polygon[-1]:
+            polygon = polygon[:-1]
+        annotation_type = "polygon"
+    return {
+        "name": canonical_class_name(class_names[class_id]),
+        "bbox": bbox,
+        "polygon": polygon,
+        "annotation_type": annotation_type,
+    }
+
+
+def _body_bbox(body: dict | list[float]) -> list[float]:
+    return body["bbox"] if isinstance(body, dict) else body
 
 
 def _intersection_fraction(inner: list[float], outer: list[float]) -> float:
@@ -90,7 +107,8 @@ def _normalized_distance_to_box_center(inner: list[float], outer: list[float]) -
     return (((ix - ox) ** 2 + (iy - oy) ** 2) ** 0.5) / diag
 
 
-def _association_score(band_bbox: list[float], body_bbox: list[float]) -> tuple[bool, float]:
+def _association_score(band_bbox: list[float], body: dict | list[float]) -> tuple[bool, float]:
+    body_bbox = _body_bbox(body)
     overlap = _intersection_fraction(band_bbox, body_bbox)
     cx = (band_bbox[0] + band_bbox[2]) * 0.5
     cy = (band_bbox[1] + band_bbox[3]) * 0.5
@@ -102,20 +120,19 @@ def _association_score(band_bbox: list[float], body_bbox: list[float]) -> tuple[
 
 
 def group_bands_by_body(
-    bodies: list[list[float]], bands: list[dict], *, min_bands: int = 3, max_bands: int = 6
-) -> tuple[list[tuple[list[float] | None, list[dict]]], int]:
-    """Assign bands to resistor-body annotations.
+    bodies: list[dict | list[float]], bands: list[dict], *, min_bands: int = 3, max_bands: int = 6
+) -> tuple[list[tuple[dict | list[float] | None, list[dict]]], int]:
+    """Assign bands to whole-resistor annotations.
 
-    Returns accepted (body bbox or None, bands) groups and the number of
-    bands that could not be assigned to an eligible body. If no body is
-    annotated, one unambiguous 3-6-band image is accepted as a fallback.
+    Body metadata is preserved in the returned groups. If no whole-resistor
+    annotation exists, one unambiguous 3-6-band image is accepted as fallback.
     """
     if not bodies:
         if min_bands <= len(bands) <= max_bands:
             return [(None, bands)], 0
         return [], len(bands)
 
-    ordered_bodies = sorted(bodies, key=lambda b: ((b[1] + b[3]) * 0.5, (b[0] + b[2]) * 0.5))
+    ordered_bodies = sorted(bodies, key=lambda b: ((_body_bbox(b)[1] + _body_bbox(b)[3]) * 0.5, (_body_bbox(b)[0] + _body_bbox(b)[2]) * 0.5))
     assigned: list[list[dict]] = [[] for _ in ordered_bodies]
     unassigned = 0
     for band in bands:
@@ -130,7 +147,7 @@ def group_bands_by_body(
         _, best_idx = max(candidates)
         assigned[best_idx].append(band)
 
-    accepted: list[tuple[list[float] | None, list[dict]]] = []
+    accepted: list[tuple[dict | list[float] | None, list[dict]]] = []
     for body, body_bands in zip(ordered_bodies, assigned):
         if min_bands <= len(body_bands) <= max_bands:
             accepted.append((body, body_bands))
@@ -203,9 +220,11 @@ def import_dataset(
             except Exception as exc:
                 raise ValueError(f"{label_path}:{line_no}: {exc}") from exc
 
-        bodies = [obj["bbox"] for obj in objects if obj["name"] == body_class]
+        bodies = [obj for obj in objects if obj["name"] == body_class]
         bands = [{"color": obj["name"], "bbox": obj["bbox"]} for obj in objects if obj["name"] != body_class]
         stats["body_annotations"] += len(bodies)
+        stats["body_box_annotations"] += sum(obj["annotation_type"] == "box" for obj in bodies)
+        stats["body_polygon_annotations"] += sum(obj["annotation_type"] == "polygon" for obj in bodies)
         stats["band_annotations"] += len(bands)
         if not bodies:
             stats["images_without_body"] += 1
@@ -222,13 +241,15 @@ def import_dataset(
         source_id = roboflow_source_id(image_path)
         source_occurrences[source_id] += 1
         resistors = []
-        for body_bbox, group_bands in groups:
-            # Deliberately use the same group ID for every resistor from one
-            # source image. This forces all bodies and all Roboflow augmented
-            # variants of that source image into the same train/val/test split.
+        for body, group_bands in groups:
+            body_bbox = _body_bbox(body) if body is not None else None
+            polygon = body.get("polygon") if isinstance(body, dict) else None
+            annotation_type = body.get("annotation_type") if isinstance(body, dict) else None
             resistors.append({
                 "id": source_id,
                 "bbox": body_bbox,
+                "polygon": polygon,
+                "body_annotation_type": annotation_type,
                 "bands": group_bands,
             })
             per_band_count[len(group_bands)] += 1
