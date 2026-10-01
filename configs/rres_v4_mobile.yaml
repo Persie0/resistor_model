@@ -6,7 +6,7 @@ data:
   splits_file: data/rres-v4/splits.json
   output_size: [96, 512]
   sequence_bins: 192
-  group_session: false
+  group_session: true
   split_ratios: [0.70, 0.15, 0.15]
   num_workers: 4
 
