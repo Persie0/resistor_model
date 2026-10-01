@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import getpass
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -76,7 +75,7 @@ def clone_training_repo() -> None:
     if MODEL_REPO.exists():
         shutil.rmtree(MODEL_REPO)
     run([
-        "git", "clone", "--depth", "1", "--branch", "feat/training-stack",
+        "git", "clone", "--depth", "1", "--branch", "main",
         "https://github.com/Persie0/resistor_model.git", str(MODEL_REPO),
     ])
 
