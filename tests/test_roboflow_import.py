@@ -18,14 +18,21 @@ def test_parse_box_polygon_and_aliases():
     band = parse_yolo_label_line("0 0.5 0.5 0.2 0.4", classes, 100, 200)
     assert band["name"] == "gray"
     assert band["bbox"] == [40.0, 60.0, 60.0, 140.0]
+    assert band["polygon"] is None
+    assert band["annotation_type"] == "box"
 
     body = parse_yolo_label_line("1 0.1 0.2 0.9 0.2 0.9 0.8 0.1 0.8", classes, 100, 200)
     assert body["name"] == "resistor symbol"
     assert body["bbox"] == [10.0, 40.0, 90.0, 160.0]
+    assert body["polygon"] == [[10.0, 40.0], [90.0, 40.0], [90.0, 160.0], [10.0, 160.0]]
+    assert body["annotation_type"] == "polygon"
 
 
 def test_group_bands_assigns_two_resistors_without_cross_talk():
-    bodies = [[0, 0, 100, 40], [200, 100, 300, 140]]
+    bodies = [
+        {"bbox": [0, 0, 100, 40], "polygon": None, "annotation_type": "box"},
+        {"bbox": [200, 100, 300, 140], "polygon": None, "annotation_type": "box"},
+    ]
     bands = []
     for x in (20, 40, 60, 80):
         bands.append({"color": "red", "bbox": [x - 3, 5, x + 3, 35]})
@@ -84,6 +91,12 @@ def test_import_dataset_groups_roboflow_variants_to_same_split_id(tmp_path: Path
     assert report["counts"]["images_accepted"] == 2
     assert report["counts"]["source_groups"] == 1
     assert report["counts"]["source_groups_with_multiple_exports"] == 1
+    assert report["counts"]["body_box_annotations"] == 1
+    assert report["counts"]["body_polygon_annotations"] == 1
     assert [row["resistors"][0]["id"] for row in rows] == ["source_jpg", "source_jpg"]
     assert all(row["split"] is None for row in rows)
     assert rows[0]["resistors"][0]["bands"][1]["color"] == "gray"
+    assert rows[0]["resistors"][0]["body_annotation_type"] == "box"
+    assert rows[0]["resistors"][0]["polygon"] is None
+    assert rows[1]["resistors"][0]["body_annotation_type"] == "polygon"
+    assert rows[1]["resistors"][0]["polygon"] == [[20.0, 20.0], [180.0, 20.0], [180.0, 80.0], [20.0, 80.0]]
