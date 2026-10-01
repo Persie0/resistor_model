@@ -62,15 +62,19 @@ class MetricAccumulator:
                     self.exact_value += 1
 
     def compute(self) -> dict[str, float]:
-        f1s = []
+        f1s: list[float] = []
+        per_color: dict[str, float] = {}
         for c in range(self.num_colors):
             tp = int(self.confusion[c, c])
             fp = int(self.confusion[:, c].sum()) - tp
             fn = int(self.confusion[c, :].sum()) - tp
             denom = 2 * tp + fp + fn
+            f1 = 2 * tp / denom if denom > 0 else 0.0
+            name = INDEX_TO_COLOR.get(c, f"class_{c}")
+            per_color[f"f1_{name}"] = float(f1)
             if denom > 0:
-                f1s.append(2 * tp / denom)
-        return {
+                f1s.append(float(f1))
+        metrics = {
             "macro_f1": float(sum(f1s) / len(f1s)) if f1s else 0.0,
             "exact_sequence_accuracy": self.exact_sequence / max(self.samples, 1),
             "exact_value_accuracy": self.exact_value / max(self.value_den, 1),
@@ -78,3 +82,5 @@ class MetricAccumulator:
             "position_mae": self.pos_abs / max(self.pos_n, 1),
             "dense_accuracy": self.dense_correct / max(self.dense_n, 1),
         }
+        metrics.update(per_color)
+        return metrics
