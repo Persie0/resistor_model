@@ -50,6 +50,19 @@ def test_photometric_augment_identity_when_disabled():
     assert np.array_equal(out, image)
 
 
+def test_photometric_augment_can_be_reseeded_reproducibly():
+    image = np.linspace(0.05, 0.95, 32 * 64 * 3, dtype=np.float32).reshape(32, 64, 3)
+    augment = PhotometricAugment(probability=1.0, seed=1)
+    augment.reseed(12345)
+    first = augment(image)
+    augment.reseed(12345)
+    repeated = augment(image)
+    augment.reseed(54321)
+    different = augment(image)
+    assert np.array_equal(first, repeated)
+    assert not np.array_equal(first, different)
+
+
 def test_chromatic_channels_are_finite_for_black_pixels():
     rgb = torch.zeros(2, 3, 16, 32)
     chroma = make_chromatic_channels(rgb)
