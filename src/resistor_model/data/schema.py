@@ -29,6 +29,8 @@ class ResistorAnnotation:
     id: str
     bands: tuple[BandAnnotation, ...]
     bbox: tuple[float, float, float, float] | None = None
+    polygon: tuple[tuple[float, float], ...] | None = None
+    body_annotation_type: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "ResistorAnnotation":
@@ -40,7 +42,21 @@ class ResistorAnnotation:
             bbox = tuple(float(v) for v in bbox)
             if len(bbox) != 4 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
                 raise ValueError(f"invalid resistor bbox: {bbox}")
-        return cls(id=str(data["id"]), bands=bands, bbox=bbox)
+        polygon_raw = data.get("polygon")
+        polygon = None
+        if polygon_raw is not None:
+            polygon = tuple(tuple(float(v) for v in point) for point in polygon_raw)
+            if len(polygon) < 3 or any(len(point) != 2 for point in polygon):
+                raise ValueError(f"invalid resistor polygon: {polygon_raw}")
+        annotation_type = data.get("body_annotation_type")
+        if annotation_type is not None:
+            annotation_type = str(annotation_type)
+            if annotation_type not in {"box", "polygon"}:
+                raise ValueError(f"invalid body_annotation_type: {annotation_type}")
+        return cls(
+            id=str(data["id"]), bands=bands, bbox=bbox,
+            polygon=polygon, body_annotation_type=annotation_type,
+        )
 
 
 @dataclass(frozen=True)
@@ -94,6 +110,8 @@ def write_manifest(rows: Iterable[ImageAnnotation], path: str | Path) -> None:
                     {
                         "id": r.id,
                         "bbox": list(r.bbox) if r.bbox else None,
+                        "polygon": [list(point) for point in r.polygon] if r.polygon else None,
+                        "body_annotation_type": r.body_annotation_type,
                         "bands": [{"color": b.color, "bbox": list(b.bbox)} for b in r.bands],
                     }
                     for r in row.resistors
