@@ -12,7 +12,7 @@ Instead of treating each narrow band as an unrelated 2-D object, the pipeline re
 4. Preserve horizontal resolution, pool vertically, and run a 1-D Transformer.
 5. Predict a dense band map, up to six ordered band slots `(exists, color, center, width)`, and the band count.
 6. Train with structured losses, monotonic-order regularization, EMA, and optional two-view illumination consistency.
-7. Decode 3/4/5/6-band codes in both spatial directions with resistor-code rules. Standard 3-band codes use the implicit 20% tolerance.
+7. Decode 3/4/5/6-band codes in both spatial directions with resistor-code rules. Standard 3-band codes use the implicit 20% tolerance. If both directions are electrically valid but imply different values, decoding is reported as **ambiguous** instead of silently choosing one direction.
 
 ## Install
 
@@ -66,8 +66,8 @@ The supplied Roboflow `rres.v4` export contains a real whole-resistor class name
 
 Audit of the YOLOv8 and COCO exports:
 
-- 792 images, 746 whole-resistor annotations.
-- 616 whole-resistor boxes and 130 true polygon segmentations; COCO independently confirms all 130 polygon annotations.
+- 792 images and 3,668 color-band annotations.
+- 746 whole-resistor annotations: 616 boxes and 130 true polygon segmentations; COCO independently confirms the polygon annotations.
 - 289 images have no whole-resistor annotation, so body supervision remains optional.
 - In single-resistor images with 3–6 bands, 99.79% of band centers fall inside the whole-resistor region and 99.1% of images have every band center inside it.
 - 95.8% of those images have every band box at least 95% contained by the whole-resistor box.
@@ -77,18 +77,20 @@ The importer therefore preserves the body box/polygon and its annotation type. I
 
 A separate geometry audit compared body-derived orientation against PCA of the accepted band centers. Polygon orientation had a median error of about 1.58° and p95 about 3.22°. Axis-aligned body-box orientation had a median error of about 1.86° and p95 about 7.97%; only about 0.2% exceeded 20°. This supports using body geometry for rectification instead of throwing those annotations away.
 
+The cleaned importer accepts **829 resistor instances from 689 images**. Their annotated band counts are 69 three-band, 497 four-band, 259 five-band, and only 4 six-band resistors. There are no silver-band examples. The latter two facts are important dataset limitations: six-band and silver performance cannot be considered well validated from this dataset alone.
+
 ### Leakage protection for the supplied export
 
-The Roboflow filenames also contain repeated named capture groups: 55 named prefixes cover 182 capture stems (for example multiple captures under names such as `1k-5`). The filenames do not prove that every image in such a group is the exact same physical component, but scattering them independently across train/validation/test would be scientifically unsafe.
+The Roboflow filenames contain several repeated capture families, including both timestamped names such as `1k-5-_202512...` and numbered series such as `100R_1-4W_-60-`. The filenames do not prove that every image in a family is the exact same physical component, but scattering likely-related captures independently across train/validation/test would be scientifically unsafe.
 
 `resistor-import-roboflow` therefore:
 
 - keeps the original source ID for each accepted source image,
-- derives a conservative `session_id` from timestamped named captures,
-- does **not** collapse generic `batch` or `Error` filenames,
+- derives a conservative `session_id` for meaningful timestamped and numbered capture families,
+- does **not** collapse generic recorder/file names such as `batch`, `Error`, `image`, `img`, or `download`,
 - and the supplied `rres_v4` configs use `group_session: true` so connected IDs/sessions stay in one partition.
 
-The final real-data validation asserts that no source ID or capture group crosses train/validation/test and that all common annotated colors remain represented in both held-out splits.
+On the accepted dataset this produces **568 capture groups**, of which **60 contain multiple images**. The final validation asserts that no source ID or capture group crosses train/validation/test and that common annotated colors remain represented in both held-out splits.
 
 ## Convert YOLO band annotations
 
@@ -156,7 +158,7 @@ Outputs under `train.output_dir`:
 - `splits.json` — exact source/resistor IDs used for each split.
 - `metrics.jsonl` — epoch metrics; `lr` is the learning rate actually used for that epoch.
 
-Resume by setting `train.resume` to `last.pt`. New checkpoints restore AMP scaler state; older checkpoints without scaler state remain loadable.
+Resume by setting `train.resume` to `last.pt`. Checkpoints serialize the scheduler after advancing to the next epoch, so resumed and uninterrupted LR schedules match. New checkpoints restore AMP scaler state; older checkpoints without scaler state remain loadable.
 
 Training DataLoader workers receive independent deterministic augmentation RNG streams, avoiding duplicated/repeated NumPy augmentation sequences across workers while retaining reproducibility.
 
@@ -173,12 +175,16 @@ Metrics include:
 - band macro-F1,
 - per-color F1 (`f1_black`, `f1_brown`, …),
 - exact spatial-sequence accuracy,
-- exact decoded resistor-value accuracy,
+- exact decoded resistor-value accuracy on the **electrically unambiguous subset**,
+- `value_decode_coverage` — fraction of samples with a unique valid electrical interpretation,
+- `value_ambiguity_rate` — fraction whose color sequence is valid in both directions with different electrical values,
 - band-count accuracy,
 - normalized band-center MAE,
 - dense 1-D accuracy.
 
-Exact sequence/value accuracy should be the main product metrics; one wrong band normally means one wrong resistance value. Per-color F1 is particularly important here because the supplied data is imbalanced (for example white is much rarer than black/brown).
+Exact spatial-sequence accuracy is the primary vision metric. Do not interpret `exact_value_accuracy` without its coverage: color order alone is sometimes insufficient to choose electrical reading direction. In the supplied dataset audit, 217 of 784 electrically decodable rectified samples had two valid directions with different values, so silently preferring left-to-right would produce a misleading product metric.
+
+Per-color F1 is also important because the supplied data is imbalanced (for example white is much rarer than black/brown, silver is absent).
 
 ## Export ONNX
 
@@ -223,4 +229,4 @@ Evaluate all variants on the normal held-out test set and a manually curated OOD
 pytest -q
 ```
 
-The suite covers manifest parsing, whole-resistor box/polygon metadata, leakage-proof grouped splitting, body-driven rectification, 3/4/5/6-band bidirectional resistor decoding, dense/slot targets, deterministic augmentation reseeding, chromatic transforms, model output shapes, monotonic loss, backpropagation, consistency loss, per-color/scalar metrics, checkpoint-selection helpers, resume compatibility, configuration merging and YOLO conversion.
+The suite covers manifest parsing, whole-resistor box/polygon metadata, leakage-proof grouped splitting, body-driven rectification, clipped-band target compaction, 3/4/5/6-band bidirectional/ambiguous resistor decoding, dense/slot targets, deterministic augmentation reseeding, chromatic transforms, model output shapes, monotonic loss, backpropagation, consistency loss, per-color/scalar metrics, electrical decode coverage, checkpoint-selection helpers, resume compatibility, configuration merging and YOLO conversion.
