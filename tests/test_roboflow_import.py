@@ -100,3 +100,24 @@ def test_import_dataset_groups_roboflow_variants_to_same_split_id(tmp_path: Path
     assert rows[0]["resistors"][0]["polygon"] is None
     assert rows[1]["resistors"][0]["body_annotation_type"] == "polygon"
     assert rows[1]["resistors"][0]["polygon"] == [[20.0, 20.0], [180.0, 20.0], [180.0, 80.0], [20.0, 80.0]]
+
+
+def test_import_dataset_groups_timestamped_named_captures_but_not_generic_error_names(tmp_path: Path):
+    (tmp_path / "data.yaml").write_text(
+        "nc: 3\nnames: ['black', 'grey', 'resistor symbol']\n", encoding="utf-8"
+    )
+    named_a = "1k-5-_20251215140233_4900_jpg.rf.aaaaaaaa.jpg"
+    named_b = "1k-5-_20251214074121_4378_jpg.rf.bbbbbbbb.jpg"
+    error_a = "Error_20241105125901_5908_jpg.rf.cccccccc.jpg"
+    error_b = "Error_20241030052857_8243_jpg.rf.dddddddd.jpg"
+    for filename in (named_a, named_b, error_a, error_b):
+        _write_sample(tmp_path, "train", filename)
+
+    output = tmp_path / "manifest.jsonl"
+    import_dataset(tmp_path, output, min_bands=3, max_bands=6)
+    rows = {Path(row["image"]).name: row for row in map(json.loads, output.read_text(encoding="utf-8").splitlines())}
+
+    assert rows[named_a]["resistors"][0]["id"] != rows[named_b]["resistors"][0]["id"]
+    assert rows[named_a]["session_id"] == "1k-5"
+    assert rows[named_b]["session_id"] == "1k-5"
+    assert rows[error_a]["session_id"] != rows[error_b]["session_id"]
