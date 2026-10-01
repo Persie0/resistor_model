@@ -51,7 +51,6 @@ def test_axis_angle_is_undirected_and_handles_vertical():
 
 
 def test_polygon_axis_angle_uses_whole_resistor_orientation():
-    # 45-degree long rectangle. Polygon orientation is available without using band labels.
     poly = np.array([[10, 20], [20, 10], [90, 80], [80, 90]], dtype=np.float32)
     angle = estimate_polygon_axis_angle(poly)
     assert abs(abs(angle) - 45.0) < 1.0
@@ -72,14 +71,24 @@ def test_decoder_handles_both_directions_and_invalid_sequences():
     forward = decode_resistor(["brown", "black", "red", "gold"])
     reverse = decode_resistor(["gold", "red", "black", "brown"])
     invalid = decode_resistor(["gold", "gold", "gold", "gold"])
-    assert forward.valid and forward.ohms == 1000 and forward.tolerance_percent == 5
-    assert reverse.valid and reverse.ohms == 1000 and reverse.colors == ["brown", "black", "red", "gold"]
-    assert not invalid.valid
+    assert forward.valid and not forward.ambiguous and forward.ohms == 1000 and forward.tolerance_percent == 5
+    assert reverse.valid and not reverse.ambiguous and reverse.ohms == 1000 and reverse.colors == ["brown", "black", "red", "gold"]
+    assert not invalid.valid and not invalid.ambiguous
 
 
-def test_decoder_supports_three_band_resistors_with_implicit_20_percent_tolerance():
-    decoded = decode_resistor(["brown", "black", "red"])
+def test_decoder_marks_two_valid_different_directions_as_ambiguous():
+    decoded = decode_resistor(["brown", "black", "red", "brown"])
+    assert not decoded.valid
+    assert decoded.ambiguous
+    assert len(decoded.candidates) == 2
+    assert {candidate.ohms for candidate in decoded.candidates} == {12.0, 1000.0}
+    assert all(candidate.tolerance_percent == 1.0 for candidate in decoded.candidates)
+
+
+def test_decoder_supports_unambiguous_three_band_resistors_with_implicit_20_percent_tolerance():
+    decoded = decode_resistor(["brown", "black", "gold"])
     assert decoded.valid
-    assert decoded.ohms == 1000
+    assert not decoded.ambiguous
+    assert decoded.ohms == 1.0
     assert decoded.tolerance_percent == 20.0
     assert decoded.tempco_ppm is None
