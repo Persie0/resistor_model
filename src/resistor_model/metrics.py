@@ -18,6 +18,7 @@ class MetricAccumulator:
         self.exact_sequence = 0
         self.exact_value = 0
         self.value_den = 0
+        self.value_ambiguous = 0
         self.count_correct = 0
         self.pos_abs = 0.0
         self.pos_n = 0
@@ -61,14 +62,20 @@ class MetricAccumulator:
 
             if pc == gc and pred_seq == gt_seq:
                 self.exact_sequence += 1
+
             gt_names = [INDEX_TO_COLOR[x] for x in gt_seq if x in INDEX_TO_COLOR]
             pred_names = [INDEX_TO_COLOR[x] for x in pred_seq if x in INDEX_TO_COLOR]
             gt_dec = decode_resistor(gt_names)
-            if gt_dec.valid:
+            if gt_dec.ambiguous:
+                # A color-only sequence cannot establish one electrical truth
+                # for this sample, so do not score an arbitrary direction.
+                self.value_ambiguous += 1
+            elif gt_dec.valid:
                 self.value_den += 1
                 pred_dec = decode_resistor(pred_names)
                 if (
                     pred_dec.valid
+                    and not pred_dec.ambiguous
                     and pred_dec.ohms == gt_dec.ohms
                     and pred_dec.tolerance_percent == gt_dec.tolerance_percent
                     and pred_dec.tempco_ppm == gt_dec.tempco_ppm
@@ -91,7 +98,11 @@ class MetricAccumulator:
         metrics = {
             "macro_f1": float(sum(f1s) / len(f1s)) if f1s else 0.0,
             "exact_sequence_accuracy": self.exact_sequence / max(self.samples, 1),
+            # Exact value accuracy is conditional on samples whose color code
+            # uniquely determines an electrical interpretation.
             "exact_value_accuracy": self.exact_value / max(self.value_den, 1),
+            "value_decode_coverage": self.value_den / max(self.samples, 1),
+            "value_ambiguity_rate": self.value_ambiguous / max(self.samples, 1),
             "count_accuracy": self.count_correct / max(self.samples, 1),
             "position_mae": self.pos_abs / max(self.pos_n, 1),
             "dense_accuracy": self.dense_correct / max(self.dense_n, 1),
