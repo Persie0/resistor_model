@@ -77,6 +77,61 @@ def _advance_scheduler_for_checkpoint(scheduler) -> dict:
     return scheduler.state_dict()
 
 
+def _atomic_torch_save(obj, path: str | Path) -> None:
+    """Serialize a checkpoint to a sibling temp file, then atomically replace it."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(target.name + ".tmp")
+    try:
+        torch.save(obj, temp)
+        temp.replace(target)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def _progress_interval(total_steps: int, updates: int = 10) -> int:
+    """Return a batch interval that yields roughly ``updates`` progress lines."""
+    return max(1, math.ceil(max(int(total_steps), 1) / max(int(updates), 1)))
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_progress(
+    *,
+    phase: str,
+    epoch: int,
+    epochs: int,
+    step: int,
+    total_steps: int,
+    running_loss: float,
+    lr: float | None,
+    elapsed: float,
+) -> str:
+    total = max(int(total_steps), 1)
+    done = min(max(int(step), 0), total)
+    percent = 100.0 * done / total
+    eta = float(elapsed) * max(total - done, 0) / max(done, 1)
+    parts = [
+        f"[{phase}]",
+        f"epoch {epoch}/{epochs}",
+        f"batch {done}/{total}",
+        f"{percent:.1f}%",
+        f"loss {float(running_loss):.4f}",
+    ]
+    if lr is not None:
+        parts.append(f"lr {float(lr):.3e}")
+    parts.extend((f"elapsed {_format_duration(elapsed)}", f"eta {_format_duration(eta)}"))
+    return " | ".join(parts)
+
+
 def _to_device(batch: dict, device: torch.device) -> dict:
     return {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
@@ -117,7 +172,20 @@ def _dense_weights(cfg: dict, device: torch.device) -> torch.Tensor:
     return w
 
 
-def train_one_epoch(model, ema, loader, optimizer, scaler, device, cfg, *, max_batches: int | None = None) -> dict[str, float]:
+def train_one_epoch(
+    model,
+    ema,
+    loader,
+    optimizer,
+    scaler,
+    device,
+    cfg,
+    *,
+    max_batches: int | None = None,
+    epoch: int = 1,
+    epochs: int = 1,
+    show_progress: bool = True,
+) -> dict[str, float]:
     model.train()
     weights = _loss_weights(cfg)
     dense_weights = _dense_weights(cfg, device)
@@ -125,6 +193,11 @@ def train_one_epoch(model, ema, loader, optimizer, scaler, device, cfg, *, max_b
     count = 0
     use_amp = bool(cfg["train"]["amp"]) and device.type == "cuda"
     optimizer.zero_grad(set_to_none=True)
+    total_steps = len(loader)
+    if max_batches is not None:
+        total_steps = min(total_steps, max(int(max_batches), 0))
+    interval = _progress_interval(total_steps)
+    started = time.time()
     for step, batch in enumerate(loader):
         if max_batches is not None and step >= max_batches:
             break
@@ -144,17 +217,46 @@ def train_one_epoch(model, ema, loader, optimizer, scaler, device, cfg, *, max_b
         for k, v in loss.parts.items():
             sums[k] = sums.get(k, 0.0) + float(v.detach())
         count += 1
+        if show_progress and (count % interval == 0 or count == total_steps):
+            print(
+                _format_progress(
+                    phase="train",
+                    epoch=epoch,
+                    epochs=epochs,
+                    step=count,
+                    total_steps=total_steps,
+                    running_loss=sums["total"] / max(count, 1),
+                    lr=float(optimizer.param_groups[0]["lr"]),
+                    elapsed=time.time() - started,
+                ),
+                flush=True,
+            )
     return {k: v / max(count, 1) for k, v in sums.items()}
 
 
 @torch.no_grad()
-def evaluate_loader(model, loader, device, cfg, *, max_batches: int | None = None) -> dict[str, float]:
+def evaluate_loader(
+    model,
+    loader,
+    device,
+    cfg,
+    *,
+    max_batches: int | None = None,
+    epoch: int = 1,
+    epochs: int = 1,
+    show_progress: bool = True,
+) -> dict[str, float]:
     model.eval()
     acc = MetricAccumulator(int(cfg["model"]["num_colors"]), int(cfg["model"]["max_bands"]))
     weights = _loss_weights(cfg)
     dense_weights = _dense_weights(cfg, device)
     loss_sum = 0.0
     count = 0
+    total_steps = len(loader)
+    if max_batches is not None:
+        total_steps = min(total_steps, max(int(max_batches), 0))
+    interval = _progress_interval(total_steps)
+    started = time.time()
     for step, batch in enumerate(loader):
         if max_batches is not None and step >= max_batches:
             break
@@ -164,6 +266,20 @@ def evaluate_loader(model, loader, device, cfg, *, max_batches: int | None = Non
         loss_sum += float(loss.total)
         count += 1
         acc.update(out, batch)
+        if show_progress and (count % interval == 0 or count == total_steps):
+            print(
+                _format_progress(
+                    phase="val",
+                    epoch=epoch,
+                    epochs=epochs,
+                    step=count,
+                    total_steps=total_steps,
+                    running_loss=loss_sum / max(count, 1),
+                    lr=None,
+                    elapsed=time.time() - started,
+                ),
+                flush=True,
+            )
     metrics = acc.compute()
     metrics["loss"] = loss_sum / max(count, 1)
     return metrics
@@ -214,11 +330,41 @@ def main() -> None:
             float(ckpt.get("best_macro_f1", -1.0)),
         )
 
+    print(
+        f"Training on {device} | epochs {start_epoch + 1}-{epochs} | "
+        f"train batches {len(train_loader)} | val batches {len(val_loader)}",
+        flush=True,
+    )
     for epoch in range(start_epoch, epochs):
         t0 = time.time()
         lr_used = float(optimizer.param_groups[0]["lr"])
-        train_metrics = train_one_epoch(model, ema, train_loader, optimizer, scaler, device, cfg, max_batches=1 if args.smoke else None)
-        val_metrics = evaluate_loader(ema.model, val_loader, device, cfg, max_batches=1 if args.smoke else None)
+        print(
+            f"[epoch {epoch + 1}/{epochs}] start | lr {lr_used:.3e} | "
+            f"train batches {1 if args.smoke else len(train_loader)} | "
+            f"val batches {1 if args.smoke else len(val_loader)}",
+            flush=True,
+        )
+        train_metrics = train_one_epoch(
+            model,
+            ema,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            cfg,
+            max_batches=1 if args.smoke else None,
+            epoch=epoch + 1,
+            epochs=epochs,
+        )
+        val_metrics = evaluate_loader(
+            ema.model,
+            val_loader,
+            device,
+            cfg,
+            max_batches=1 if args.smoke else None,
+            epoch=epoch + 1,
+            epochs=epochs,
+        )
         current_key = _selection_key(val_metrics)
         is_best = current_key > best_key
         if is_best:
@@ -240,13 +386,13 @@ def main() -> None:
             "splits": {k: sorted(v) for k, v in split_ids.items()},
             "val_metrics": val_metrics,
         }
-        torch.save(checkpoint, out_dir / "last.pt")
+        _atomic_torch_save(checkpoint, out_dir / "last.pt")
         if is_best:
-            torch.save(checkpoint, out_dir / "best.pt")
+            _atomic_torch_save(checkpoint, out_dir / "best.pt")
         record = {"epoch": epoch, "seconds": time.time() - t0, "lr": lr_used, "train": train_metrics, "val": val_metrics}
         with (out_dir / "metrics.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
-        print(json.dumps(record, indent=2))
+        print(json.dumps(record, indent=2), flush=True)
 
 
 if __name__ == "__main__":
