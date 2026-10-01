@@ -9,6 +9,10 @@ class PhotometricAugment:
     def __init__(self, probability: float = 0.85, exposure_ev: float = 1.5, gamma_range: tuple[float, float] = (0.7, 1.4), wb_range: tuple[float, float] = (0.78, 1.28), noise_std: float = 0.025, seed: int | None = None) -> None:
         self.probability = float(probability); self.exposure_ev = float(exposure_ev); self.gamma_range = gamma_range; self.wb_range = wb_range; self.noise_std = float(noise_std); self.rng = np.random.default_rng(seed)
 
+    def reseed(self, seed: int) -> None:
+        """Reset the RNG, e.g. from a PyTorch DataLoader worker seed."""
+        self.rng = np.random.default_rng(int(seed))
+
     def __call__(self, image: np.ndarray) -> np.ndarray:
         if self.probability <= 0 or self.rng.random() > self.probability:
             return image.copy()
