@@ -45,18 +45,49 @@ class ResistorBandDataset(Dataset):
         self.augmenter2.reseed(seed + 100003)
 
     def _targets(self, bands: list[dict], width: int) -> dict[str, torch.Tensor]:
+        if width <= 0:
+            raise ValueError("target width must be positive")
+
         ordered = sorted(bands, key=lambda b: (b["bbox"][0] + b["bbox"][2]) * 0.5)
-        if len(ordered) > self.max_bands: raise ValueError(f"sample has {len(ordered)} bands but max_bands={self.max_bands}")
+        # Rectification can place a transformed annotation entirely outside the
+        # finite output canvas. Clip first and compact only usable bands so slot
+        # indices, existence flags, and count always describe the same sequence.
+        valid: list[tuple[str, float, float]] = []
+        for band in ordered:
+            x1, _, x2, _ = band["bbox"]
+            x1 = float(np.clip(x1, 0, width))
+            x2 = float(np.clip(x2, 0, width))
+            if x2 <= x1:
+                continue
+            valid.append((band["color"], x1, x2))
+
+        if len(valid) > self.max_bands:
+            raise ValueError(f"sample has {len(valid)} visible bands but max_bands={self.max_bands}")
+
         dense = torch.full((self.sequence_bins,), BACKGROUND_INDEX, dtype=torch.long)
-        exists = torch.zeros(self.max_bands, dtype=torch.float32); colors = torch.full((self.max_bands,), -100, dtype=torch.long)
-        centers = torch.zeros(self.max_bands, dtype=torch.float32); widths = torch.zeros(self.max_bands, dtype=torch.float32)
-        for i, band in enumerate(ordered):
-            x1, _, x2, _ = band["bbox"]; x1 = float(np.clip(x1, 0, width)); x2 = float(np.clip(x2, 0, width))
-            if x2 <= x1: continue
-            color_idx = COLOR_TO_INDEX[band["color"]]; exists[i] = 1.0; colors[i] = color_idx; centers[i] = ((x1 + x2) * 0.5) / width; widths[i] = (x2 - x1) / width
-            b1 = max(0, min(self.sequence_bins - 1, int(np.floor(x1 / width * self.sequence_bins)))); b2 = max(b1 + 1, min(self.sequence_bins, int(np.ceil(x2 / width * self.sequence_bins))))
+        exists = torch.zeros(self.max_bands, dtype=torch.float32)
+        colors = torch.full((self.max_bands,), -100, dtype=torch.long)
+        centers = torch.zeros(self.max_bands, dtype=torch.float32)
+        widths = torch.zeros(self.max_bands, dtype=torch.float32)
+
+        for i, (color, x1, x2) in enumerate(valid):
+            color_idx = COLOR_TO_INDEX[color]
+            exists[i] = 1.0
+            colors[i] = color_idx
+            centers[i] = ((x1 + x2) * 0.5) / width
+            widths[i] = (x2 - x1) / width
+            b1 = max(0, min(self.sequence_bins - 1, int(np.floor(x1 / width * self.sequence_bins))))
+            b2 = max(b1 + 1, min(self.sequence_bins, int(np.ceil(x2 / width * self.sequence_bins))))
             dense[b1:b2] = color_idx
-        return {"dense_target": dense, "slot_exists": exists, "slot_colors": colors, "slot_centers": centers, "slot_widths": widths, "count": torch.tensor(len(ordered), dtype=torch.long)}
+
+        return {
+            "dense_target": dense,
+            "slot_exists": exists,
+            "slot_colors": colors,
+            "slot_centers": centers,
+            "slot_widths": widths,
+            "count": torch.tensor(len(valid), dtype=torch.long),
+        }
 
     @staticmethod
     def _to_tensor(rgb: np.ndarray) -> torch.Tensor:
