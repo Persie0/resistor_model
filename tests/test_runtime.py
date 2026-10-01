@@ -8,6 +8,7 @@ import yaml
 from resistor_model.config import load_config
 from resistor_model.metrics import MetricAccumulator
 from resistor_model.tools.convert_yolo import convert_yolo_pair
+from resistor_model.train import _restore_scaler_state, _selection_key
 
 
 def test_config_deep_merges_user_overrides(tmp_path: Path):
@@ -42,6 +43,29 @@ def test_metric_accumulator_reports_exact_sequence_value_and_per_color_f1():
     assert m["f1_red"] == 1.0
     assert m["f1_gold"] == 1.0
     assert m["f1_black"] < 1.0
+
+
+def test_selection_key_breaks_exact_sequence_ties_with_macro_f1():
+    a = {"exact_sequence_accuracy": 0.8, "macro_f1": 0.55}
+    b = {"exact_sequence_accuracy": 0.8, "macro_f1": 0.60}
+    c = {"exact_sequence_accuracy": 0.81, "macro_f1": 0.10}
+    assert _selection_key(b) > _selection_key(a)
+    assert _selection_key(c) > _selection_key(b)
+
+
+def test_restore_scaler_state_is_backward_compatible():
+    class FakeScaler:
+        def __init__(self):
+            self.loaded = None
+
+        def load_state_dict(self, state):
+            self.loaded = state
+
+    scaler = FakeScaler()
+    _restore_scaler_state(scaler, {})
+    assert scaler.loaded is None
+    _restore_scaler_state(scaler, {"scaler_state": {"scale": 123.0}})
+    assert scaler.loaded == {"scale": 123.0}
 
 
 def test_yolo_converter_creates_absolute_band_boxes(tmp_path: Path):
