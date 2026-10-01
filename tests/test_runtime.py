@@ -11,7 +11,7 @@ from resistor_model.config import load_config
 from resistor_model.metrics import MetricAccumulator
 from resistor_model.runtime import resolve_split_ids
 from resistor_model.tools.convert_yolo import convert_yolo_pair
-from resistor_model.train import _restore_scaler_state, _selection_key
+from resistor_model.train import _advance_scheduler_for_checkpoint, _restore_scaler_state, _selection_key
 
 
 def test_config_deep_merges_user_overrides(tmp_path: Path):
@@ -102,6 +102,23 @@ def test_restore_scaler_state_is_backward_compatible():
     assert scaler.loaded is None
     _restore_scaler_state(scaler, {"scaler_state": {"scale": 123.0}})
     assert scaler.loaded == {"scale": 123.0}
+
+
+def test_scheduler_is_advanced_before_its_checkpoint_state_is_captured():
+    class FakeScheduler:
+        def __init__(self):
+            self.steps = 0
+
+        def step(self):
+            self.steps += 1
+
+        def state_dict(self):
+            return {"steps": self.steps}
+
+    scheduler = FakeScheduler()
+    state = _advance_scheduler_for_checkpoint(scheduler)
+    assert scheduler.steps == 1
+    assert state == {"steps": 1}
 
 
 def _band(color: str = "brown") -> dict:
