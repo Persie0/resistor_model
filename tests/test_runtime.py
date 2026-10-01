@@ -20,7 +20,7 @@ def test_config_deep_merges_user_overrides(tmp_path: Path):
     assert cfg["data"]["output_size"] == [128, 768]
 
 
-def test_metric_accumulator_reports_exact_sequence_and_value():
+def test_metric_accumulator_reports_exact_sequence_value_and_per_color_f1():
     acc = MetricAccumulator(num_colors=12, max_bands=6)
     slot_color = torch.full((2,6,12), -10.0)
     for b, seq in enumerate([[1,0,2,10],[1,1,2,10]]):
@@ -38,6 +38,10 @@ def test_metric_accumulator_reports_exact_sequence_and_value():
     assert m["position_mae"] == 0.0
     assert m["dense_accuracy"] == 1.0
     assert 0.0 <= m["macro_f1"] <= 1.0
+    assert m["f1_brown"] == 1.0
+    assert m["f1_red"] == 1.0
+    assert m["f1_gold"] == 1.0
+    assert m["f1_black"] < 1.0
 
 
 def test_yolo_converter_creates_absolute_band_boxes(tmp_path: Path):
