@@ -1,0 +1,45 @@
+seed: 42
+
+data:
+  manifest: data/rres-v4/manifest.jsonl
+  image_root: data/rres-v4
+  splits_file: data/rres-v4/splits.json
+  output_size: [96, 512]
+  sequence_bins: 192
+  group_session: true
+  split_ratios: [0.70, 0.15, 0.15]
+  num_workers: 4
+
+model:
+  num_colors: 12
+  max_bands: 6
+  base_channels: 24
+  d_model: 128
+  transformer_layers: 2
+  transformer_heads: 4
+  slot_decoder_layers: 1
+  dropout: 0.10
+  use_chromatic_branch: true
+
+train:
+  epochs: 24
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.04
+  warmup_epochs: 2
+  grad_clip: 1.0
+  amp: true
+  ema_decay: 0.995
+  output_dir: runs/rres-v4-mobile
+  resume: null
+
+loss:
+  dense: 1.0
+  color: 2.0
+  exist: 0.5
+  center: 1.0
+  width: 0.5
+  order: 0.2
+  count: 0.2
+  consistency: 0.05
+  body_class_weight: 0.25
