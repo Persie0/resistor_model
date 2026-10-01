@@ -1,3 +1,5 @@
+import torch
+
 from resistor_model import train
 
 
@@ -44,3 +46,14 @@ def test_validation_progress_omits_learning_rate():
     assert "val" in line
     assert "loss 0.7500" in line
     assert "lr " not in line
+
+
+def test_atomic_torch_save_replaces_checkpoint_without_leaving_temp_file(tmp_path):
+    target = tmp_path / "last.pt"
+    target.write_bytes(b"old-checkpoint")
+
+    train._atomic_torch_save({"epoch": 7}, target)
+
+    loaded = torch.load(target, map_location="cpu", weights_only=False)
+    assert loaded["epoch"] == 7
+    assert not (tmp_path / "last.pt.tmp").exists()
