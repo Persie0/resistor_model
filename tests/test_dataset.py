@@ -38,6 +38,22 @@ def test_dataset_builds_dense_and_ordered_slot_targets(tmp_path: Path):
     assert (sample["dense_target"] != BACKGROUND_INDEX).sum().item() > 0
 
 
+def test_target_generation_drops_fully_clipped_bands_without_slot_holes(tmp_path: Path):
+    manifest = _make_fixture(tmp_path)
+    ds = ResistorBandDataset(manifest, tmp_path, output_size=(64, 384), sequence_bins=96, max_bands=6, augment=False)
+    targets = ds._targets(
+        [
+            {"color": "brown", "bbox": [-30, 5, -10, 50]},
+            {"color": "red", "bbox": [80, 5, 100, 50]},
+            {"color": "gold", "bbox": [180, 5, 200, 50]},
+        ],
+        width=160,
+    )
+    assert targets["count"].item() == 1
+    assert targets["slot_exists"].tolist() == [1, 0, 0, 0, 0, 0]
+    assert targets["slot_colors"].tolist() == [COLOR_TO_INDEX["red"], -100, -100, -100, -100, -100]
+
+
 def test_dataset_filter_by_resistor_id(tmp_path: Path):
     manifest = _make_fixture(tmp_path)
     assert len(ResistorBandDataset(manifest, tmp_path, allowed_resistor_ids={"other"}, augment=False)) == 0
