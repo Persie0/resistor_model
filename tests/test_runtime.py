@@ -39,10 +39,10 @@ def test_metric_accumulator_reports_exact_sequence_value_and_per_color_f1():
     assert m["position_mae"] == 0.0
     assert m["dense_accuracy"] == 1.0
     assert 0.0 <= m["macro_f1"] <= 1.0
-    assert m["f1_brown"] == 1.0
+    assert m["f1_brown"] == 0.8  # one black band is a brown false positive
     assert m["f1_red"] == 1.0
     assert m["f1_gold"] == 1.0
-    assert m["f1_black"] < 1.0
+    assert abs(m["f1_black"] - (2.0 / 3.0)) < 1e-9
 
 
 def test_selection_key_breaks_exact_sequence_ties_with_macro_f1():
