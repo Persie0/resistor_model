@@ -54,6 +54,18 @@ def _seed_dataset_worker(worker_id: int) -> None:
         info.dataset.reseed_augmenters(int(info.seed))
 
 
+def _selection_key(metrics: dict[str, float]) -> tuple[float, float]:
+    """Rank checkpoints by whole-sequence accuracy, then band macro-F1."""
+    return (float(metrics["exact_sequence_accuracy"]), float(metrics["macro_f1"]))
+
+
+def _restore_scaler_state(scaler, checkpoint: dict) -> None:
+    """Restore AMP state when present while remaining compatible with old checkpoints."""
+    state = checkpoint.get("scaler_state")
+    if state is not None:
+        scaler.load_state_dict(state)
+
+
 def _to_device(batch: dict, device: torch.device) -> dict:
     return {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
@@ -175,7 +187,8 @@ def main() -> None:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg["train"]["amp"]) and device.type == "cuda")
-    start_epoch, best = 0, -1.0
+    start_epoch = 0
+    best_key = (-1.0, -1.0)
     resume = cfg["train"].get("resume")
     if resume:
         ckpt = torch.load(resume, map_location=device, weights_only=False)
@@ -183,15 +196,22 @@ def main() -> None:
         ema.model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
         scheduler.load_state_dict(ckpt["scheduler_state"])
+        _restore_scaler_state(scaler, ckpt)
         start_epoch = int(ckpt["epoch"]) + 1
-        best = float(ckpt.get("best_exact_sequence", -1.0))
+        best_key = (
+            float(ckpt.get("best_exact_sequence", -1.0)),
+            float(ckpt.get("best_macro_f1", -1.0)),
+        )
 
     for epoch in range(start_epoch, epochs):
         t0 = time.time()
+        lr_used = float(optimizer.param_groups[0]["lr"])
         train_metrics = train_one_epoch(model, ema, train_loader, optimizer, scaler, device, cfg, max_batches=1 if args.smoke else None)
         val_metrics = evaluate_loader(ema.model, val_loader, device, cfg, max_batches=1 if args.smoke else None)
-        scheduler.step()
-        score = val_metrics["exact_sequence_accuracy"]
+        current_key = _selection_key(val_metrics)
+        is_best = current_key > best_key
+        if is_best:
+            best_key = current_key
         checkpoint = {
             "epoch": epoch,
             "config": cfg,
@@ -199,15 +219,17 @@ def main() -> None:
             "raw_model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
-            "best_exact_sequence": max(best, score),
+            "scaler_state": scaler.state_dict(),
+            "best_exact_sequence": best_key[0],
+            "best_macro_f1": best_key[1],
             "splits": {k: sorted(v) for k, v in split_ids.items()},
             "val_metrics": val_metrics,
         }
         torch.save(checkpoint, out_dir / "last.pt")
-        if score >= best:
-            best = score
+        if is_best:
             torch.save(checkpoint, out_dir / "best.pt")
-        record = {"epoch": epoch, "seconds": time.time() - t0, "lr": optimizer.param_groups[0]["lr"], "train": train_metrics, "val": val_metrics}
+        scheduler.step()
+        record = {"epoch": epoch, "seconds": time.time() - t0, "lr": lr_used, "train": train_metrics, "val": val_metrics}
         with (out_dir / "metrics.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
         print(json.dumps(record, indent=2))
