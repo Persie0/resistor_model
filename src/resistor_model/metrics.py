@@ -10,7 +10,10 @@ class MetricAccumulator:
     def __init__(self, num_colors: int = 12, max_bands: int = 6) -> None:
         self.num_colors = num_colors
         self.max_bands = max_bands
-        self.confusion = torch.zeros((num_colors, num_colors), dtype=torch.long)
+        # Last row/column is an explicit "no band" state so count errors are
+        # reflected in per-color precision/recall instead of being ignored.
+        self.no_band_index = num_colors
+        self.confusion = torch.zeros((num_colors + 1, num_colors + 1), dtype=torch.long)
         self.samples = 0
         self.exact_sequence = 0
         self.exact_value = 0
@@ -33,10 +36,6 @@ class MetricAccumulator:
         dense_pred = outputs["dense_logits"].argmax(1).detach().cpu()
         dense_gt = targets["dense_target"].detach().cpu()
 
-        valid = gt_colors >= 0
-        for g, p in zip(gt_colors[valid].tolist(), pred_colors[valid].tolist()):
-            if 0 <= g < self.num_colors and 0 <= p < self.num_colors:
-                self.confusion[g, p] += 1
         self.pos_abs += float((pred_center[exists] - gt_center[exists]).abs().sum())
         self.pos_n += int(exists.sum())
         self.dense_correct += int((dense_pred == dense_gt).sum())
@@ -46,10 +45,20 @@ class MetricAccumulator:
         self.samples += bsz
         self.count_correct += int((pred_count == gt_count).sum())
         for b in range(bsz):
-            gc = int(gt_count[b])
-            pc = int(pred_count[b])
+            gc = max(0, min(int(gt_count[b]), self.max_bands))
+            pc = max(0, min(int(pred_count[b]), self.max_bands))
             gt_seq = [int(x) for x in gt_colors[b, :gc].tolist()]
             pred_seq = [int(x) for x in pred_colors[b, :pc].tolist()]
+
+            # Ordered slots are aligned by index. Missing predictions become
+            # color -> no-band false negatives; extras become no-band -> color
+            # false positives. This makes macro-F1 sensitive to count errors.
+            for i in range(max(gc, pc)):
+                g = gt_seq[i] if i < gc else self.no_band_index
+                p = pred_seq[i] if i < pc else self.no_band_index
+                if 0 <= g <= self.no_band_index and 0 <= p <= self.no_band_index:
+                    self.confusion[g, p] += 1
+
             if pc == gc and pred_seq == gt_seq:
                 self.exact_sequence += 1
             gt_names = [INDEX_TO_COLOR[x] for x in gt_seq if x in INDEX_TO_COLOR]
@@ -58,7 +67,12 @@ class MetricAccumulator:
             if gt_dec.valid:
                 self.value_den += 1
                 pred_dec = decode_resistor(pred_names)
-                if pred_dec.valid and pred_dec.ohms == gt_dec.ohms and pred_dec.tolerance_percent == gt_dec.tolerance_percent and pred_dec.tempco_ppm == gt_dec.tempco_ppm:
+                if (
+                    pred_dec.valid
+                    and pred_dec.ohms == gt_dec.ohms
+                    and pred_dec.tolerance_percent == gt_dec.tolerance_percent
+                    and pred_dec.tempco_ppm == gt_dec.tempco_ppm
+                ):
                     self.exact_value += 1
 
     def compute(self) -> dict[str, float]:
