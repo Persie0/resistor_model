@@ -48,6 +48,39 @@ def test_metric_accumulator_reports_exact_sequence_value_and_per_color_f1():
     assert abs(m["f1_black"] - (2.0 / 3.0)) < 1e-9
 
 
+def test_band_f1_penalizes_missing_and_extra_predicted_bands():
+    def run(pred_count: int, fifth_color: int = 2) -> dict[str, float]:
+        acc = MetricAccumulator(num_colors=12, max_bands=6)
+        slot_color = torch.full((1, 6, 12), -10.0)
+        for i, c in enumerate([1, 0, 2, 10, fifth_color]):
+            slot_color[0, i, c] = 10.0
+        count_logits = torch.full((1, 7), -5.0); count_logits[0, pred_count] = 5.0
+        outputs = {
+            "slot_color_logits": slot_color,
+            "count_logits": count_logits,
+            "slot_center": torch.tensor([[.1, .3, .5, .8, .9, 0.0]]),
+            "dense_logits": torch.zeros((1, 13, 8)),
+        }
+        outputs["dense_logits"][:, 12, :] = 1.0
+        targets = {
+            "slot_colors": torch.tensor([[1, 0, 2, 10, -100, -100]]),
+            "slot_exists": torch.tensor([[1, 1, 1, 1, 0, 0]], dtype=torch.float32),
+            "slot_centers": torch.tensor([[.1, .3, .5, .8, 0, 0]]),
+            "count": torch.tensor([4]),
+            "dense_target": torch.full((1, 8), 12, dtype=torch.long),
+        }
+        acc.update(outputs, targets)
+        return acc.compute()
+
+    missing = run(3)
+    assert missing["f1_gold"] == 0.0
+    assert missing["macro_f1"] < 1.0
+
+    extra = run(5, fifth_color=2)
+    assert abs(extra["f1_red"] - (2.0 / 3.0)) < 1e-9
+    assert extra["macro_f1"] < 1.0
+
+
 def test_selection_key_breaks_exact_sequence_ties_with_macro_f1():
     a = {"exact_sequence_accuracy": 0.8, "macro_f1": 0.55}
     b = {"exact_sequence_accuracy": 0.8, "macro_f1": 0.60}
