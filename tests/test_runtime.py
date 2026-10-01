@@ -38,14 +38,46 @@ def test_metric_accumulator_reports_exact_sequence_value_and_per_color_f1():
     m = acc.compute()
     assert m["exact_sequence_accuracy"] == 0.5
     assert m["exact_value_accuracy"] == 0.5
+    assert m["value_decode_coverage"] == 1.0
+    assert m["value_ambiguity_rate"] == 0.0
     assert m["count_accuracy"] == 1.0
     assert m["position_mae"] == 0.0
     assert m["dense_accuracy"] == 1.0
     assert 0.0 <= m["macro_f1"] <= 1.0
-    assert m["f1_brown"] == 0.8  # one black band is a brown false positive
+    assert m["f1_brown"] == 0.8
     assert m["f1_red"] == 1.0
     assert m["f1_gold"] == 1.0
     assert abs(m["f1_black"] - (2.0 / 3.0)) < 1e-9
+
+
+def test_value_metrics_exclude_ambiguous_ground_truth_and_report_coverage():
+    acc = MetricAccumulator(num_colors=12, max_bands=6)
+    slot_color = torch.full((2, 6, 12), -10.0)
+    sequences = [[1, 0, 2, 10], [1, 0, 2, 1]]  # second is valid both ways with different values
+    for b, seq in enumerate(sequences):
+        for i, c in enumerate(seq):
+            slot_color[b, i, c] = 10.0
+    count_logits = torch.full((2, 7), -5.0); count_logits[:, 4] = 5.0
+    outputs = {
+        "slot_color_logits": slot_color,
+        "count_logits": count_logits,
+        "slot_center": torch.tensor([[.1,.3,.5,.8,0,0],[.1,.3,.5,.8,0,0]]),
+        "dense_logits": torch.zeros((2,13,8)),
+    }
+    outputs["dense_logits"][:, 12, :] = 1.0
+    targets = {
+        "slot_colors": torch.tensor([[1,0,2,10,-100,-100],[1,0,2,1,-100,-100]]),
+        "slot_exists": torch.tensor([[1,1,1,1,0,0],[1,1,1,1,0,0]], dtype=torch.float32),
+        "slot_centers": torch.tensor([[.1,.3,.5,.8,0,0],[.1,.3,.5,.8,0,0]]),
+        "count": torch.tensor([4,4]),
+        "dense_target": torch.full((2,8),12,dtype=torch.long),
+    }
+    acc.update(outputs, targets)
+    m = acc.compute()
+    assert m["exact_sequence_accuracy"] == 1.0
+    assert m["exact_value_accuracy"] == 1.0
+    assert m["value_decode_coverage"] == 0.5
+    assert m["value_ambiguity_rate"] == 0.5
 
 
 def test_band_f1_penalizes_missing_and_extra_predicted_bands():
