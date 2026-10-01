@@ -20,23 +20,33 @@ class DecodeResult:
 def _decode_one(colors: list[str]) -> DecodeResult:
     colors = [c.lower() for c in colors]
     n = len(colors)
-    if n not in (4, 5, 6):
+    if n not in (3, 4, 5, 6):
         return DecodeResult(False, colors)
-    digit_count = 2 if n == 4 else 3
+
+    digit_count = 2 if n in (3, 4) else 3
     digits = colors[:digit_count]
     multiplier = colors[digit_count]
-    tolerance = colors[digit_count + 1]
-    if any(c not in DIGIT for c in digits) or multiplier not in MULTIPLIER or tolerance not in TOLERANCE:
+    if any(c not in DIGIT for c in digits) or multiplier not in MULTIPLIER:
         return DecodeResult(False, colors)
+
+    if n == 3:
+        tolerance_percent = 20.0
+    else:
+        tolerance = colors[digit_count + 1]
+        if tolerance not in TOLERANCE:
+            return DecodeResult(False, colors)
+        tolerance_percent = TOLERANCE[tolerance]
+
     tempco = None
     if n == 6:
         if colors[5] not in TEMPCO:
             return DecodeResult(False, colors)
         tempco = TEMPCO[colors[5]]
+
     significant = 0
     for c in digits:
         significant = significant * 10 + DIGIT[c]
-    return DecodeResult(True, colors, significant * MULTIPLIER[multiplier], TOLERANCE[tolerance], tempco)
+    return DecodeResult(True, colors, significant * MULTIPLIER[multiplier], tolerance_percent, tempco)
 
 
 def decode_resistor(spatial_colors: list[str]) -> DecodeResult:
