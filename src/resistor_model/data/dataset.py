@@ -60,7 +60,13 @@ class ResistorBandDataset(Dataset):
         ref = self.samples[index]; path = self.image_root / ref.image; bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if bgr is None: raise FileNotFoundError(f"could not read image: {path}")
         bands = [{"color": b.color, "bbox": list(b.bbox)} for b in ref.resistor.bands]
-        crop_bgr, transformed = rectify_resistor(bgr, bands, resistor_bbox=list(ref.resistor.bbox) if ref.resistor.bbox else None, output_size=self.output_size)
+        crop_bgr, transformed = rectify_resistor(
+            bgr,
+            bands,
+            resistor_bbox=list(ref.resistor.bbox) if ref.resistor.bbox else None,
+            resistor_polygon=[list(point) for point in ref.resistor.polygon] if ref.resistor.polygon else None,
+            output_size=self.output_size,
+        )
         rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0; targets = self._targets(transformed, self.output_size[1])
         out: dict = {"image": self._to_tensor(self.augmenter(rgb)), **targets, "resistor_id": ref.resistor.id, "image_path": str(path)}
         if self.two_views: out["image_view2"] = self._to_tensor(self.augmenter2(rgb))
