@@ -24,7 +24,10 @@ _CAPTURE_STAMP = re.compile(
     r"^(?P<prefix>.+?)_(?P<timestamp>20\d{12})_(?P<tail>\d+)(?:_(?:jpg|jpeg|png|webp|bmp))?$",
     re.IGNORECASE,
 )
+_FORMAT_SUFFIX = re.compile(r"_(?:jpg|jpeg|png|webp|bmp)$", re.IGNORECASE)
+_NUMBERED_CAPTURE = re.compile(r"^(?P<prefix>.+?)[_-]+(?P<number>\d+)[_-]*$")
 _GENERIC_CAPTURE_PREFIXES = {"batch", "error"}
+_GENERIC_NUMBERED_PREFIXES = {"image", "img", "download", "r", "rr", "rrr", "batch", "error"}
 
 
 def canonical_class_name(name: str) -> str:
@@ -40,21 +43,30 @@ def roboflow_source_id(image_path: str | Path) -> str:
 def roboflow_capture_group_id(image_path: str | Path) -> str:
     """Return a conservative repeated-capture group for split isolation.
 
-    Named captures in rres.v4 use forms such as
-    ``1k-5-_20251215140233_4900_jpg``. Those captures may show the same
-    component/setup and therefore must not be independently scattered across
-    train/validation/test. Generic recorder names such as ``batch`` or
-    ``Error`` are deliberately not collapsed because they do not identify a
-    resistor family/component.
+    rres.v4 contains both timestamped series such as
+    ``1k-5-_20251215140233_4900_jpg`` and numbered series such as
+    ``100R_1-4W_-60-_jpg``. Captures sharing those meaningful prefixes are
+    kept in one split because they may show the same physical component or
+    acquisition setup. Generic recorder/file names remain independent.
     """
     source_id = roboflow_source_id(image_path)
-    match = _CAPTURE_STAMP.match(source_id)
-    if match is None:
+
+    stamped = _CAPTURE_STAMP.match(source_id)
+    if stamped is not None:
+        prefix = stamped.group("prefix").rstrip("_- ")
+        if prefix and prefix.lower() not in _GENERIC_CAPTURE_PREFIXES:
+            return prefix
         return source_id
-    prefix = match.group("prefix").rstrip("_- ")
-    if not prefix or prefix.lower() in _GENERIC_CAPTURE_PREFIXES:
-        return source_id
-    return prefix
+
+    # Roboflow commonly embeds the original extension in the stem. Remove it
+    # before detecting a trailing capture counter.
+    cleaned = _FORMAT_SUFFIX.sub("", source_id).rstrip("_- ")
+    numbered = _NUMBERED_CAPTURE.match(cleaned)
+    if numbered is not None:
+        prefix = numbered.group("prefix").rstrip("_- ")
+        if prefix and prefix.lower() not in _GENERIC_NUMBERED_PREFIXES:
+            return prefix
+    return source_id
 
 
 def _bbox_from_yolo_fields(fields: list[float], width: int, height: int) -> list[float]:
