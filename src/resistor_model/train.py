@@ -77,6 +77,19 @@ def _advance_scheduler_for_checkpoint(scheduler) -> dict:
     return scheduler.state_dict()
 
 
+def _atomic_torch_save(obj, path: str | Path) -> None:
+    """Serialize a checkpoint to a sibling temp file, then atomically replace it."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(target.name + ".tmp")
+    try:
+        torch.save(obj, temp)
+        temp.replace(target)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
 def _progress_interval(total_steps: int, updates: int = 10) -> int:
     """Return a batch interval that yields roughly ``updates`` progress lines."""
     return max(1, math.ceil(max(int(total_steps), 1) / max(int(updates), 1)))
@@ -373,9 +386,9 @@ def main() -> None:
             "splits": {k: sorted(v) for k, v in split_ids.items()},
             "val_metrics": val_metrics,
         }
-        torch.save(checkpoint, out_dir / "last.pt")
+        _atomic_torch_save(checkpoint, out_dir / "last.pt")
         if is_best:
-            torch.save(checkpoint, out_dir / "best.pt")
+            _atomic_torch_save(checkpoint, out_dir / "best.pt")
         record = {"epoch": epoch, "seconds": time.time() - t0, "lr": lr_used, "train": train_metrics, "val": val_metrics}
         with (out_dir / "metrics.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
