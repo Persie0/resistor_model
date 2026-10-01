@@ -1,12 +1,15 @@
+import json
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 import torch
 import yaml
 
 from resistor_model.config import load_config
 from resistor_model.metrics import MetricAccumulator
+from resistor_model.runtime import resolve_split_ids
 from resistor_model.tools.convert_yolo import convert_yolo_pair
 from resistor_model.train import _restore_scaler_state, _selection_key
 
@@ -66,6 +69,33 @@ def test_restore_scaler_state_is_backward_compatible():
     assert scaler.loaded is None
     _restore_scaler_state(scaler, {"scaler_state": {"scale": 123.0}})
     assert scaler.loaded == {"scale": 123.0}
+
+
+def _band(color: str = "brown") -> dict:
+    return {"color": color, "bbox": [1, 1, 2, 3]}
+
+
+def test_explicit_manifest_splits_reject_overlapping_resistor_ids(tmp_path: Path):
+    manifest = tmp_path / "manifest.jsonl"
+    rows = [
+        {"image": "train.jpg", "split": "train", "resistors": [{"id": "same", "bands": [_band()]}]},
+        {"image": "val.jpg", "split": "val", "resistors": [{"id": "same", "bands": [_band("red")]}]},
+        {"image": "test.jpg", "split": "test", "resistors": [{"id": "other", "bands": [_band("black")]}]},
+    ]
+    manifest.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    cfg = load_config()
+    cfg["data"]["splits_file"] = None
+    with pytest.raises(ValueError, match="overlap"):
+        resolve_split_ids(manifest, cfg)
+
+
+def test_split_file_rejects_overlapping_resistor_ids(tmp_path: Path):
+    split_file = tmp_path / "splits.json"
+    split_file.write_text(json.dumps({"train": ["r1", "r2"], "val": ["r2"], "test": ["r3"]}), encoding="utf-8")
+    cfg = load_config()
+    cfg["data"]["splits_file"] = str(split_file)
+    with pytest.raises(ValueError, match="overlap"):
+        resolve_split_ids(tmp_path / "unused.jsonl", cfg)
 
 
 def test_yolo_converter_creates_absolute_band_boxes(tmp_path: Path):
