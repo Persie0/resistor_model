@@ -75,3 +75,11 @@ def test_decoder_handles_both_directions_and_invalid_sequences():
     assert forward.valid and forward.ohms == 1000 and forward.tolerance_percent == 5
     assert reverse.valid and reverse.ohms == 1000 and reverse.colors == ["brown", "black", "red", "gold"]
     assert not invalid.valid
+
+
+def test_decoder_supports_three_band_resistors_with_implicit_20_percent_tolerance():
+    decoded = decode_resistor(["brown", "black", "red"])
+    assert decoded.valid
+    assert decoded.ohms == 1000
+    assert decoded.tolerance_percent == 20.0
+    assert decoded.tempco_ppm is None
