@@ -1,0 +1,1 @@
+{"image":"example_001.jpg","session_id":"phoneA_daylight_01","camera_id":"phoneA","resistors":[{"id":"physical_resistor_001","bbox":[110,180,790,420],"bands":[{"color":"brown","bbox":[250,205,285,395]},{"color":"black","bbox":[350,205,385,395]},{"color":"red","bbox":[455,205,490,395]},{"color":"gold","bbox":[650,205,685,395]}]}]}

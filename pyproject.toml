@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resistor-model"
+version = "0.1.0"
+description = "Structured resistor color-band recognition training stack"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "opencv-python>=4.8",
+  "Pillow>=10",
+  "PyYAML>=6",
+  "torch>=2.2",
+  "torchvision>=0.17",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+export = ["onnx>=1.16", "onnxscript>=0.1"]
+
+[project.scripts]
+resistor-train = "resistor_model.train:main"
+resistor-evaluate = "resistor_model.evaluate:main"
+resistor-export = "resistor_model.export:main"
+resistor-audit = "resistor_model.tools.audit_dataset:main"
+resistor-split = "resistor_model.tools.make_splits:main"
+resistor-convert-yolo = "resistor_model.tools.convert_yolo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,45 @@
+seed: 42
+
+data:
+  manifest: data/manifest.jsonl
+  image_root: data/images
+  splits_file: null
+  output_size: [128, 768]
+  sequence_bins: 256
+  group_session: false
+  split_ratios: [0.70, 0.15, 0.15]
+  num_workers: 4
+
+model:
+  num_colors: 12
+  max_bands: 6
+  base_channels: 48
+  d_model: 256
+  transformer_layers: 4
+  transformer_heads: 8
+  slot_decoder_layers: 2
+  dropout: 0.10
+  use_chromatic_branch: true
+
+train:
+  epochs: 100
+  batch_size: 32
+  lr: 0.0003
+  weight_decay: 0.05
+  warmup_epochs: 5
+  grad_clip: 1.0
+  amp: true
+  ema_decay: 0.999
+  output_dir: runs/bandnet
+  resume: null
+
+loss:
+  dense: 1.0
+  color: 2.0
+  exist: 0.5
+  center: 1.0
+  width: 0.5
+  order: 0.2
+  count: 0.2
+  consistency: 0.1
+  body_class_weight: 0.25
