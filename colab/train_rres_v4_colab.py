@@ -31,7 +31,8 @@ TRANSFORMER_LAYERS = 3
 TRANSFORMER_HEADS = 8
 SLOT_DECODER_LAYERS = 2
 CONSISTENCY_WEIGHT = 0.05
-CTC_WEIGHT = 0.20
+# CTC starts at a much larger raw scale than the primary CE losses; 0.10 keeps it auxiliary.
+CTC_WEIGHT = 0.10
 KL_WEIGHT = 0.03
 LABEL_SMOOTHING = 0.05
 SEED = 42
