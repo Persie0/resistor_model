@@ -24,8 +24,8 @@ class ModelEMA:
     def __init__(self, model: torch.nn.Module, decay: float = 0.999) -> None:
         self.decay = float(decay)
         self.model = deepcopy(model).eval()
-        for p in self.model.parameters():
-            p.requires_grad_(False)
+        for parameter in self.model.parameters():
+            parameter.requires_grad_(False)
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
@@ -61,20 +61,17 @@ def _selection_key(metrics: dict[str, float]) -> tuple[float, float]:
 
 
 def _restore_scaler_state(scaler, checkpoint: dict) -> None:
-    """Restore AMP state when present while remaining compatible with old checkpoints."""
     state = checkpoint.get("scaler_state")
     if state is not None:
         scaler.load_state_dict(state)
 
 
 def _advance_scheduler_for_checkpoint(scheduler) -> dict:
-    """Advance to the next-epoch LR and return the state that must be checkpointed."""
     scheduler.step()
     return scheduler.state_dict()
 
 
 def _atomic_torch_save(obj, path: str | Path) -> None:
-    """Serialize a checkpoint to a sibling temp file, then atomically replace it."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(target.name + ".tmp")
@@ -87,7 +84,6 @@ def _atomic_torch_save(obj, path: str | Path) -> None:
 
 
 def _progress_interval(total_steps: int, updates: int = 10) -> int:
-    """Return a batch interval that yields roughly ``updates`` progress lines."""
     return max(1, math.ceil(max(int(total_steps), 1) / max(int(updates), 1)))
 
 
@@ -129,12 +125,20 @@ def _format_progress(
 
 
 def _to_device(batch: dict, device: torch.device) -> dict:
-    return {key: (value.to(device, non_blocking=True) if torch.is_tensor(value) else value) for key, value in batch.items()}
+    return {
+        key: (value.to(device, non_blocking=True) if torch.is_tensor(value) else value)
+        for key, value in batch.items()
+    }
 
 
 def _loss_weights(cfg: dict) -> LossWeights:
     raw = cfg["loss"]
-    return LossWeights(**{key: float(raw.get(key, field.default)) for key, field in LossWeights.__dataclass_fields__.items()})
+    return LossWeights(
+        **{
+            key: float(raw.get(key, field.default))
+            for key, field in LossWeights.__dataclass_fields__.items()
+        }
+    )
 
 
 def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader, DataLoader]:
@@ -146,7 +150,10 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         sequence_bins=int(data_cfg["sequence_bins"]),
         max_bands=int(cfg["model"]["max_bands"]),
     )
-    two_views = float(cfg["loss"].get("consistency", 0.0)) > 0 or float(cfg["loss"].get("kl", 0.0)) > 0
+    two_views = (
+        float(cfg["loss"].get("consistency", 0.0)) > 0
+        or float(cfg["loss"].get("kl", 0.0)) > 0
+    )
     train_ds = ResistorBandDataset(
         **common,
         allowed_resistor_ids=split_ids["train"],
@@ -170,6 +177,7 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         raise ValueError("training split is empty")
     if not val_ds:
         raise ValueError("validation split is empty; provide more resistor IDs or explicit splits")
+
     kwargs = dict(
         batch_size=int(cfg["train"]["batch_size"]),
         num_workers=int(data_cfg["num_workers"]),
@@ -195,10 +203,15 @@ def _dense_weights(cfg: dict, device: torch.device) -> torch.Tensor:
     return weights
 
 
-def _color_weights(dataset: ResistorBandDataset, cfg: dict, device: torch.device) -> torch.Tensor | None:
+def _color_weights(
+    dataset: ResistorBandDataset,
+    cfg: dict,
+    device: torch.device,
+) -> torch.Tensor | None:
     mode = str(cfg["loss"].get("color_balance", "none"))
     if mode == "none":
         return None
+
     num_colors = int(cfg["model"]["num_colors"])
     counts = torch.zeros(num_colors, dtype=torch.float64)
     for sample in dataset.samples:
@@ -206,6 +219,7 @@ def _color_weights(dataset: ResistorBandDataset, cfg: dict, device: torch.device
             index = COLOR_TO_INDEX.get(band.color)
             if index is not None and index < num_colors:
                 counts[index] += 1.0
+
     present = counts > 0
     if not bool(present.any()):
         return None
@@ -226,6 +240,7 @@ def train_one_epoch(
     device,
     cfg,
     *,
+    color_class_weights: torch.Tensor | None = None,
     max_batches: int | None = None,
     epoch: int = 1,
     epochs: int = 1,
@@ -234,7 +249,11 @@ def train_one_epoch(
     model.train()
     weights = _loss_weights(cfg)
     dense_weights = _dense_weights(cfg, device)
-    color_weights = _color_weights(loader.dataset, cfg, device)
+    color_weights = (
+        color_class_weights
+        if color_class_weights is not None
+        else _color_weights(loader.dataset, cfg, device)
+    )
     sums: dict[str, float] = {"total": 0.0}
     count = 0
     use_amp = bool(cfg["train"]["amp"]) and device.type == "cuda"
@@ -244,6 +263,7 @@ def train_one_epoch(
         total_steps = min(total_steps, max(int(max_batches), 0))
     interval = _progress_interval(total_steps)
     started = time.time()
+
     for step, batch in enumerate(loader):
         if max_batches is not None and step >= max_batches:
             break
@@ -266,6 +286,7 @@ def train_one_epoch(
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
         ema.update(model)
+
         sums["total"] += float(loss.total.detach())
         for key, value in loss.parts.items():
             sums[key] = sums.get(key, 0.0) + float(value.detach())
@@ -294,6 +315,7 @@ def evaluate_loader(
     device,
     cfg,
     *,
+    color_class_weights: torch.Tensor | None = None,
     max_batches: int | None = None,
     epoch: int = 1,
     epochs: int = 1,
@@ -309,7 +331,11 @@ def evaluate_loader(
     )
     weights = _loss_weights(cfg)
     dense_weights = _dense_weights(cfg, device)
-    color_weights = _color_weights(loader.dataset, cfg, device)
+    color_weights = (
+        color_class_weights
+        if color_class_weights is not None
+        else _color_weights(loader.dataset, cfg, device)
+    )
     loss_sum = 0.0
     count = 0
     total_steps = len(loader)
@@ -317,6 +343,7 @@ def evaluate_loader(
         total_steps = min(total_steps, max(int(max_batches), 0))
     interval = _progress_interval(total_steps)
     started = time.time()
+
     for step, batch in enumerate(loader):
         if max_batches is not None and step >= max_batches:
             break
@@ -346,6 +373,7 @@ def evaluate_loader(
                 ),
                 flush=True,
             )
+
     metrics = acc.compute()
     metrics["loss"] = loss_sum / max(count, 1)
     return metrics
@@ -356,6 +384,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/bandnet.yaml"))
     parser.add_argument("--smoke", action="store_true", help="Run only one train and validation batch")
     args = parser.parse_args()
+
     cfg = load_config(args.config)
     _seed_everything(int(cfg["seed"]))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -368,6 +397,7 @@ def main() -> None:
     )
 
     train_loader, val_loader = _make_loaders(cfg, split_ids)
+    color_class_weights = _color_weights(train_loader.dataset, cfg, device)
     model = build_model(cfg).to(device)
     ema = ModelEMA(model, float(cfg["train"]["ema_decay"]))
     optimizer = torch.optim.AdamW(
@@ -427,6 +457,7 @@ def main() -> None:
             scaler,
             device,
             cfg,
+            color_class_weights=color_class_weights,
             max_batches=1 if args.smoke else None,
             epoch=epoch + 1,
             epochs=epochs,
@@ -436,6 +467,7 @@ def main() -> None:
             val_loader,
             device,
             cfg,
+            color_class_weights=color_class_weights,
             max_batches=1 if args.smoke else None,
             epoch=epoch + 1,
             epochs=epochs,
@@ -462,6 +494,7 @@ def main() -> None:
         _atomic_torch_save(checkpoint, out_dir / "last.pt")
         if is_best:
             _atomic_torch_save(checkpoint, out_dir / "best.pt")
+
         record = {
             "epoch": epoch,
             "seconds": time.time() - started,
