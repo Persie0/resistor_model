@@ -17,8 +17,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "group_session": False,
         "split_ratios": [0.7, 0.15, 0.15],
         "num_workers": 4,
+        "geometric_augment": False,
+        "hflip_prob": 0.5,
+        "vflip_prob": 0.5,
+        "jitter_strength": 1.0,
     },
     "model": {
+        "architecture": "v1",
+        "backbone": "convnext_lite",
+        "pretrained": False,
         "num_colors": 12,
         "max_bands": 6,
         "base_channels": 48,
@@ -27,6 +34,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "transformer_heads": 8,
         "slot_decoder_layers": 2,
         "dropout": 0.1,
+        "drop_path": 0.1,
+        "conv_kernel": 7,
         "use_chromatic_branch": True,
     },
     "train": {
@@ -50,7 +59,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "order": 0.2,
         "count": 0.2,
         "consistency": 0.1,
+        "ctc": 0.0,
+        "kl": 0.0,
+        "label_smoothing": 0.0,
         "body_class_weight": 0.25,
+        "color_balance": "none",
+        "max_color_weight": 4.0,
+    },
+    "eval": {
+        "extra_decoders": False,
+        "series_bonus": 0.0,
     },
 }
 
@@ -71,13 +89,38 @@ def validate_config(cfg: dict) -> None:
         raise ValueError("data.output_size values must be positive")
     if cfg["data"]["sequence_bins"] <= 0:
         raise ValueError("data.sequence_bins must be positive")
-    if cfg["model"]["max_bands"] < 1:
+    for key in ("hflip_prob", "vflip_prob"):
+        value = float(cfg["data"].get(key, 0.0))
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"data.{key} must be in [0, 1]")
+    if float(cfg["data"].get("jitter_strength", 0.0)) < 0.0:
+        raise ValueError("data.jitter_strength must be >= 0")
+
+    model_cfg = cfg["model"]
+    if model_cfg["max_bands"] < 1:
         raise ValueError("model.max_bands must be >= 1")
-    if cfg["model"]["d_model"] % cfg["model"]["transformer_heads"] != 0:
+    if model_cfg["d_model"] % model_cfg["transformer_heads"] != 0:
         raise ValueError("model.d_model must be divisible by model.transformer_heads")
+    if str(model_cfg.get("architecture", "v1")).lower() not in {"v1", "v2"}:
+        raise ValueError("model.architecture must be v1 or v2")
+    if int(model_cfg.get("conv_kernel", 7)) < 1 or int(model_cfg.get("conv_kernel", 7)) % 2 == 0:
+        raise ValueError("model.conv_kernel must be a positive odd integer")
+
     ratios = cfg["data"]["split_ratios"]
     if len(ratios) != 3 or abs(sum(ratios) - 1.0) > 1e-6:
         raise ValueError("data.split_ratios must contain three values summing to 1")
+
+    loss_cfg = cfg["loss"]
+    for key in ("dense", "color", "exist", "center", "width", "order", "count", "consistency", "ctc", "kl"):
+        if float(loss_cfg.get(key, 0.0)) < 0.0:
+            raise ValueError(f"loss.{key} must be >= 0")
+    smoothing = float(loss_cfg.get("label_smoothing", 0.0))
+    if not 0.0 <= smoothing < 1.0:
+        raise ValueError("loss.label_smoothing must be in [0, 1)")
+    if str(loss_cfg.get("color_balance", "none")) not in {"none", "sqrt_inverse"}:
+        raise ValueError("loss.color_balance must be none or sqrt_inverse")
+    if float(loss_cfg.get("max_color_weight", 4.0)) < 1.0:
+        raise ValueError("loss.max_color_weight must be >= 1")
 
 
 def load_config(path: str | Path | None = None) -> dict:
