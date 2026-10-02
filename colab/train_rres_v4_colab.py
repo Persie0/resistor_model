@@ -56,19 +56,24 @@ ZIP_PATH = WORK / "resistor-bandnet-r1-v2-colab.zip"
 
 def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
     print("+", " ".join(cmd), flush=True)
-    result = subprocess.run(
+    process = subprocess.Popen(
         cmd,
         cwd=str(cwd) if cwd else None,
-        check=True,
         text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.STDOUT if capture else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
     )
-    if capture:
-        assert result.stdout is not None
-        print(result.stdout, flush=True)
-        return result.stdout
-    return ""
+    assert process.stdout is not None
+    captured: list[str] = []
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        if capture:
+            captured.append(line)
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd)
+    return "".join(captured)
 
 
 def require_gpu() -> None:
