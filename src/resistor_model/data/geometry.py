@@ -75,6 +75,7 @@ def rectify_resistor(
     output_size: tuple[int, int] = (128, 768),
     longitudinal_margin: float = 0.30,
     transverse_margin: float = 1.2,
+    jitter: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, list[dict]]:
     if not bands:
         raise ValueError("at least one band is required")
@@ -121,6 +122,20 @@ def rectify_resistor(
         max_u += pad_u
         min_v -= pad_v
         max_v += pad_v
+
+    if jitter:
+        angle = float(jitter.get("angle", 0.0))
+        if angle:
+            cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+            u = np.array([u[0] * cos_a - u[1] * sin_a, u[0] * sin_a + u[1] * cos_a], dtype=np.float32)
+            v = np.array([-u[1], u[0]], dtype=np.float32)
+        span_u_w, span_v_w = max_u - min_u, max_v - min_v
+        cen_u = 0.5 * (min_u + max_u) + float(jitter.get("shift_u", 0.0)) * span_u_w
+        cen_v = 0.5 * (min_v + max_v) + float(jitter.get("shift_v", 0.0)) * span_v_w
+        half_u = 0.5 * span_u_w * float(jitter.get("scale_u", 1.0))
+        half_v = 0.5 * span_v_w * float(jitter.get("scale_v", 1.0))
+        min_u, max_u = cen_u - half_u, cen_u + half_u
+        min_v, max_v = cen_v - half_v, cen_v + half_v
 
     src = np.asarray([
         origin + u * min_u + v * min_v,
