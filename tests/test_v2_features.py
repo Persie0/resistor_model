@@ -2,15 +2,17 @@ from copy import deepcopy
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from resistor_model.config import DEFAULT_CONFIG
 from resistor_model.constants import COLOR_TO_INDEX
 from resistor_model.decoding import best_valid_sequence, count_log_probs
-from resistor_model.losses import LossWeights, compute_loss, ctc_color_loss
+from resistor_model.losses import LossResult, LossWeights, compute_loss, ctc_color_loss
 from resistor_model.metrics import MetricAccumulator
 from resistor_model.models.bandnet import ResistorBandNet
 from resistor_model.models.bandnet_v2 import ResistorBandNetV2, chroma_channels
 from resistor_model.runtime import build_model
+from resistor_model.train import evaluate_loader
 
 
 def _targets(batch: int = 1, bins: int = 24):
@@ -134,3 +136,54 @@ def test_runtime_keeps_v1_default_and_builds_v2_when_requested():
         "slot_decoder_layers": 1,
     })
     assert isinstance(build_model(v2_cfg), ResistorBandNetV2)
+
+
+class _EvalDataset(Dataset):
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, index: int) -> dict:
+        del index
+        sample = {key: value[0] for key, value in _targets().items()}
+        sample["image"] = torch.zeros(3, 16, 32)
+        return sample
+
+
+class _EvalModel(torch.nn.Module):
+    def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
+        batch = image.shape[0]
+        return {
+            "slot_color_logits": torch.zeros(batch, 6, 12),
+            "slot_exist_logits": torch.zeros(batch, 6),
+            "slot_center": torch.zeros(batch, 6),
+            "slot_width": torch.zeros(batch, 6),
+            "count_logits": torch.zeros(batch, 7),
+            "dense_logits": torch.zeros(batch, 13, 24),
+            "embedding": torch.zeros(batch, 8),
+        }
+
+
+def test_evaluate_loader_uses_supplied_training_color_weights(monkeypatch):
+    expected = torch.linspace(0.5, 1.5, 12)
+    captured: list[torch.Tensor | None] = []
+
+    def fake_compute_loss(outputs, targets, weights, **kwargs):
+        del targets, weights
+        captured.append(kwargs.get("color_class_weights"))
+        zero = outputs["dense_logits"].sum() * 0.0
+        return LossResult(total=zero, parts={})
+
+    monkeypatch.setattr("resistor_model.train.compute_loss", fake_compute_loss)
+    cfg = deepcopy(DEFAULT_CONFIG)
+    cfg["data"]["num_workers"] = 0
+    loader = DataLoader(_EvalDataset(), batch_size=1)
+    evaluate_loader(
+        _EvalModel(),
+        loader,
+        torch.device("cpu"),
+        cfg,
+        color_class_weights=expected,
+        show_progress=False,
+    )
+    assert len(captured) == 1
+    assert captured[0] is expected
