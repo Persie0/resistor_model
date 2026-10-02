@@ -83,8 +83,17 @@ def _atomic_torch_save(obj, path: str | Path) -> None:
             temp.unlink()
 
 
-def _progress_interval(total_steps: int, updates: int = 10) -> int:
+def _progress_interval(total_steps: int, updates: int = 50) -> int:
     return max(1, math.ceil(max(int(total_steps), 1) / max(int(updates), 1)))
+
+
+def _should_report_progress(*, step: int, total_steps: int, interval: int) -> bool:
+    interval = max(int(interval), 1)
+    return int(step) == 1 or int(step) == int(total_steps) or int(step) % interval == 0
+
+
+def _print_status(message: str) -> None:
+    print(message, flush=True)
 
 
 def _format_duration(seconds: float) -> str:
@@ -291,7 +300,7 @@ def train_one_epoch(
         for key, value in loss.parts.items():
             sums[key] = sums.get(key, 0.0) + float(value.detach())
         count += 1
-        if show_progress and (count % interval == 0 or count == total_steps):
+        if show_progress and _should_report_progress(step=count, total_steps=total_steps, interval=interval):
             print(
                 _format_progress(
                     phase="train",
@@ -359,7 +368,7 @@ def evaluate_loader(
         loss_sum += float(loss.total)
         count += 1
         acc.update(out, batch)
-        if show_progress and (count % interval == 0 or count == total_steps):
+        if show_progress and _should_report_progress(step=count, total_steps=total_steps, interval=interval):
             print(
                 _format_progress(
                     phase="val",
@@ -390,14 +399,27 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(cfg["train"]["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
+    _print_status(f"[setup] device {device} | output {out_dir}")
+    _print_status("[setup] resolving train/val/test split IDs...")
     split_ids = resolve_split_ids(cfg["data"]["manifest"], cfg)
+    _print_status(
+        f"[setup] splits ready | train {len(split_ids['train'])} | "
+        f"val {len(split_ids['val'])} | test {len(split_ids['test'])}"
+    )
     (out_dir / "splits.json").write_text(
         json.dumps({key: sorted(value) for key, value in split_ids.items()}, indent=2),
         encoding="utf-8",
     )
 
+    _print_status("[setup] building datasets and data loaders...")
     train_loader, val_loader = _make_loaders(cfg, split_ids)
+    _print_status(
+        f"[setup] loaders ready | train samples {len(train_loader.dataset)} | "
+        f"val samples {len(val_loader.dataset)}"
+    )
+    _print_status("[setup] computing training color-balance weights...")
     color_class_weights = _color_weights(train_loader.dataset, cfg, device)
+    _print_status("[setup] building model, EMA, optimizer and scheduler...")
     model = build_model(cfg).to(device)
     ema = ModelEMA(model, float(cfg["train"]["ema_decay"]))
     optimizer = torch.optim.AdamW(
@@ -421,8 +443,11 @@ def main() -> None:
     )
     start_epoch = 0
     best_key = (-1.0, -1.0)
+    parameters = sum(parameter.numel() for parameter in model.parameters())
+    _print_status(f"[setup] model ready | parameters {parameters / 1_000_000:.2f}M")
     resume = cfg["train"].get("resume")
     if resume:
+        _print_status(f"[setup] loading checkpoint {resume}...")
         checkpoint = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint.get("raw_model_state", checkpoint["model_state"]))
         ema.model.load_state_dict(checkpoint["model_state"])

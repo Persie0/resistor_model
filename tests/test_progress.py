@@ -3,12 +3,31 @@ import torch
 from resistor_model import train
 
 
-def test_progress_interval_targets_about_ten_updates():
+def test_progress_interval_targets_about_fifty_updates():
     assert train._progress_interval(1) == 1
     assert train._progress_interval(8) == 1
-    assert train._progress_interval(95) == 10
-    assert train._progress_interval(100) == 10
-    assert train._progress_interval(101) == 11
+    assert train._progress_interval(95) == 2
+    assert train._progress_interval(100) == 2
+    assert train._progress_interval(101) == 3
+
+
+def test_progress_reports_first_batch_regular_intervals_and_final_batch():
+    assert train._should_report_progress(step=1, total_steps=100, interval=10)
+    assert not train._should_report_progress(step=9, total_steps=100, interval=10)
+    assert train._should_report_progress(step=10, total_steps=100, interval=10)
+    assert train._should_report_progress(step=100, total_steps=100, interval=10)
+
+
+def test_print_status_flushes_immediately(monkeypatch):
+    calls = []
+
+    def fake_print(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr("builtins.print", fake_print)
+    train._print_status("[setup] building loaders")
+
+    assert calls == [(("[setup] building loaders",), {"flush": True})]
 
 
 def test_progress_line_contains_phase_percent_loss_lr_elapsed_and_eta():
