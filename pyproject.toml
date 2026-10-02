@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 export = ["onnx>=1.16", "onnxscript>=0.1"]
+resnet = ["torchvision>=0.17"]
 
 [project.scripts]
 resistor-train = "resistor_model.train:main"
@@ -26,6 +27,7 @@ resistor-audit = "resistor_model.tools.audit_dataset:main"
 resistor-split = "resistor_model.tools.make_splits:main"
 resistor-convert-yolo = "resistor_model.tools.convert_yolo:main"
 resistor-import-roboflow = "resistor_model.tools.import_roboflow_yolo:main"
+resistor-import-coco = "resistor_model.tools.import_roboflow_coco:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
