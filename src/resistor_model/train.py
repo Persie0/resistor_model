@@ -96,6 +96,11 @@ def _print_status(message: str) -> None:
     print(message, flush=True)
 
 
+def _format_pre_batch_status(*, phase: str, epoch: int, epochs: int, total_steps: int) -> str:
+    total = max(int(total_steps), 1)
+    return f"[{phase}] epoch {epoch}/{epochs} | waiting for batch 1/{total}..."
+
+
 def _format_duration(seconds: float) -> str:
     total = max(0, int(round(float(seconds))))
     hours, remainder = divmod(total, 3600)
@@ -272,6 +277,10 @@ def train_one_epoch(
         total_steps = min(total_steps, max(int(max_batches), 0))
     interval = _progress_interval(total_steps)
     started = time.time()
+    if show_progress:
+        _print_status(_format_pre_batch_status(
+            phase="train", epoch=epoch, epochs=epochs, total_steps=total_steps
+        ))
 
     for step, batch in enumerate(loader):
         if max_batches is not None and step >= max_batches:
@@ -352,6 +361,10 @@ def evaluate_loader(
         total_steps = min(total_steps, max(int(max_batches), 0))
     interval = _progress_interval(total_steps)
     started = time.time()
+    if show_progress:
+        _print_status(_format_pre_batch_status(
+            phase="val", epoch=epoch, epochs=epochs, total_steps=total_steps
+        ))
 
     for step, batch in enumerate(loader):
         if max_batches is not None and step >= max_batches:
