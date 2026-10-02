@@ -30,6 +30,13 @@ def test_print_status_flushes_immediately(monkeypatch):
     assert calls == [(("[setup] building loaders",), {"flush": True})]
 
 
+def test_pre_batch_progress_status_is_explicit():
+    line = train._format_pre_batch_status(
+        phase="train", epoch=1, epochs=100, total_steps=589
+    )
+    assert line == "[train] epoch 1/100 | waiting for batch 1/589..."
+
+
 def test_progress_line_contains_phase_percent_loss_lr_elapsed_and_eta():
     line = train._format_progress(
         phase="train",
