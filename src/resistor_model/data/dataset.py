@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 
 from resistor_model.constants import BACKGROUND_INDEX, COLOR_TO_INDEX
 from .augment import PhotometricAugment
+from .geom_aug import apply_flips, sample_rectify_jitter
 from .geometry import rectify_resistor
 from .schema import ResistorAnnotation, load_manifest
 
@@ -22,36 +23,59 @@ class SampleRef:
 
 
 class ResistorBandDataset(Dataset):
-    def __init__(self, manifest: str | Path, image_root: str | Path | None = None, *, split: str | None = None, allowed_resistor_ids: set[str] | None = None, output_size: tuple[int, int] = (128, 768), sequence_bins: int = 256, max_bands: int = 6, augment: bool = False, two_views: bool = False, seed: int = 42) -> None:
+    def __init__(
+        self,
+        manifest: str | Path,
+        image_root: str | Path | None = None,
+        *,
+        split: str | None = None,
+        allowed_resistor_ids: set[str] | None = None,
+        output_size: tuple[int, int] = (128, 768),
+        sequence_bins: int = 256,
+        max_bands: int = 6,
+        augment: bool = False,
+        two_views: bool = False,
+        seed: int = 42,
+        geometric_augment: bool = False,
+        hflip_prob: float = 0.5,
+        vflip_prob: float = 0.5,
+        jitter_strength: float = 1.0,
+    ) -> None:
         self.manifest_path = Path(manifest)
         self.image_root = Path(image_root) if image_root is not None else self.manifest_path.parent
-        self.output_size = output_size; self.sequence_bins = int(sequence_bins); self.max_bands = int(max_bands); self.two_views = bool(two_views)
+        self.output_size = output_size
+        self.sequence_bins = int(sequence_bins)
+        self.max_bands = int(max_bands)
+        self.two_views = bool(two_views)
+        self.geometric_augment = bool(geometric_augment)
+        self.hflip_prob = float(hflip_prob)
+        self.vflip_prob = float(vflip_prob)
+        self.jitter_strength = float(jitter_strength)
         self.augmenter = PhotometricAugment(seed=seed) if augment else PhotometricAugment(probability=0.0, seed=seed)
         self.augmenter2 = PhotometricAugment(seed=seed + 100003) if augment else PhotometricAugment(probability=0.0, seed=seed + 100003)
+        self.geom_rng = np.random.default_rng(seed + 200003)
         self.samples: list[SampleRef] = []
         for row in load_manifest(self.manifest_path):
-            if split is not None and row.split != split: continue
+            if split is not None and row.split != split:
+                continue
             for resistor in row.resistors:
-                if allowed_resistor_ids is not None and resistor.id not in allowed_resistor_ids: continue
+                if allowed_resistor_ids is not None and resistor.id not in allowed_resistor_ids:
+                    continue
                 self.samples.append(SampleRef(row.image, resistor, row.session_id))
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def reseed_augmenters(self, seed: int) -> None:
-        """Give each DataLoader worker independent, reproducible augmentation streams."""
         seed = int(seed)
         self.augmenter.reseed(seed)
         self.augmenter2.reseed(seed + 100003)
+        self.geom_rng = np.random.default_rng(seed + 200003)
 
     def _targets(self, bands: list[dict], width: int) -> dict[str, torch.Tensor]:
         if width <= 0:
             raise ValueError("target width must be positive")
-
-        ordered = sorted(bands, key=lambda b: (b["bbox"][0] + b["bbox"][2]) * 0.5)
-        # Rectification can place a transformed annotation entirely outside the
-        # finite output canvas. Clip first and compact only usable bands so slot
-        # indices, existence flags, and count always describe the same sequence.
+        ordered = sorted(bands, key=lambda band: (band["bbox"][0] + band["bbox"][2]) * 0.5)
         valid: list[tuple[str, float, float]] = []
         for band in ordered:
             x1, _, x2, _ = band["bbox"]
@@ -60,7 +84,6 @@ class ResistorBandDataset(Dataset):
             if x2 <= x1:
                 continue
             valid.append((band["color"], x1, x2))
-
         if len(valid) > self.max_bands:
             raise ValueError(f"sample has {len(valid)} visible bands but max_bands={self.max_bands}")
 
@@ -69,7 +92,6 @@ class ResistorBandDataset(Dataset):
         colors = torch.full((self.max_bands,), -100, dtype=torch.long)
         centers = torch.zeros(self.max_bands, dtype=torch.float32)
         widths = torch.zeros(self.max_bands, dtype=torch.float32)
-
         for i, (color, x1, x2) in enumerate(valid):
             color_idx = COLOR_TO_INDEX[color]
             exists[i] = 1.0
@@ -79,7 +101,6 @@ class ResistorBandDataset(Dataset):
             b1 = max(0, min(self.sequence_bins - 1, int(np.floor(x1 / width * self.sequence_bins))))
             b2 = max(b1 + 1, min(self.sequence_bins, int(np.ceil(x2 / width * self.sequence_bins))))
             dense[b1:b2] = color_idx
-
         return {
             "dense_target": dense,
             "slot_exists": exists,
@@ -94,17 +115,37 @@ class ResistorBandDataset(Dataset):
         return torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1))).float()
 
     def __getitem__(self, index: int) -> dict:
-        ref = self.samples[index]; path = self.image_root / ref.image; bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if bgr is None: raise FileNotFoundError(f"could not read image: {path}")
-        bands = [{"color": b.color, "bbox": list(b.bbox)} for b in ref.resistor.bands]
+        ref = self.samples[index]
+        path = self.image_root / ref.image
+        bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise FileNotFoundError(f"could not read image: {path}")
+        bands = [{"color": band.color, "bbox": list(band.bbox)} for band in ref.resistor.bands]
+        jitter = sample_rectify_jitter(self.geom_rng, self.jitter_strength) if self.geometric_augment else None
         crop_bgr, transformed = rectify_resistor(
             bgr,
             bands,
             resistor_bbox=list(ref.resistor.bbox) if ref.resistor.bbox else None,
             resistor_polygon=[list(point) for point in ref.resistor.polygon] if ref.resistor.polygon else None,
             output_size=self.output_size,
+            jitter=jitter,
         )
-        rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0; targets = self._targets(transformed, self.output_size[1])
-        out: dict = {"image": self._to_tensor(self.augmenter(rgb)), **targets, "resistor_id": ref.resistor.id, "image_path": str(path)}
-        if self.two_views: out["image_view2"] = self._to_tensor(self.augmenter2(rgb))
+        rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        if self.geometric_augment:
+            rgb, transformed = apply_flips(
+                rgb,
+                transformed,
+                self.geom_rng,
+                self.hflip_prob,
+                self.vflip_prob,
+            )
+        targets = self._targets(transformed, self.output_size[1])
+        out: dict = {
+            "image": self._to_tensor(self.augmenter(rgb)),
+            **targets,
+            "resistor_id": ref.resistor.id,
+            "image_path": str(path),
+        }
+        if self.two_views:
+            out["image_view2"] = self._to_tensor(self.augmenter2(rgb))
         return out

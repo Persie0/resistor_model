@@ -3,17 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from torch import nn
+
 from resistor_model.data.schema import load_manifest
 from resistor_model.data.split import grouped_split
 from resistor_model.models.bandnet import ResistorBandNet
+from resistor_model.models.bandnet_v2 import ResistorBandNetV2
 
 
 _SPLIT_NAMES = ("train", "val", "test")
 
 
-def build_model(cfg: dict) -> ResistorBandNet:
+def build_model(cfg: dict) -> nn.Module:
     data_cfg, model_cfg = cfg["data"], cfg["model"]
-    return ResistorBandNet(
+    common = dict(
         num_colors=model_cfg["num_colors"],
         max_bands=model_cfg["max_bands"],
         sequence_bins=data_cfg["sequence_bins"],
@@ -25,6 +28,18 @@ def build_model(cfg: dict) -> ResistorBandNet:
         dropout=model_cfg["dropout"],
         use_chromatic_branch=model_cfg["use_chromatic_branch"],
     )
+    architecture = str(model_cfg.get("architecture", "v1")).lower()
+    if architecture == "v1":
+        return ResistorBandNet(**common)
+    if architecture == "v2":
+        return ResistorBandNetV2(
+            **common,
+            backbone=str(model_cfg.get("backbone", "convnext_lite")),
+            pretrained=bool(model_cfg.get("pretrained", False)),
+            drop_path=float(model_cfg.get("drop_path", 0.1)),
+            conv_kernel=int(model_cfg.get("conv_kernel", 7)),
+        )
+    raise ValueError(f"unsupported model architecture: {architecture!r}")
 
 
 def _validate_disjoint_split_ids(split_ids: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -56,16 +71,18 @@ def resolve_split_ids(manifest_path: str | Path, cfg: dict) -> dict[str, set[str
             raise ValueError("when using explicit manifest splits, every row must have split=train|val|test")
         out = {"train": set(), "val": set(), "test": set()}
         for row in rows:
-            for r in row.resistors:
-                out[row.split].add(r.id)
+            for resistor in row.resistors:
+                out[row.split].add(resistor.id)
         return _validate_disjoint_split_ids(out)
 
-    records = [(row.image, r.id, row.session_id) for row in rows for r in row.resistors]
-    ratios = tuple(float(x) for x in cfg["data"]["split_ratios"])
+    records = [(row.image, resistor.id, row.session_id) for row in rows for resistor in row.resistors]
+    ratios = tuple(float(value) for value in cfg["data"]["split_ratios"])
     split_rows = grouped_split(
         records,
         ratios=ratios,
         seed=int(cfg["seed"]),
         group_session=bool(cfg["data"]["group_session"]),
     )
-    return _validate_disjoint_split_ids({name: {r[1] for r in items} for name, items in split_rows.items()})
+    return _validate_disjoint_split_ids(
+        {name: {record[1] for record in items} for name, items in split_rows.items()}
+    )

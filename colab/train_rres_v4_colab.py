@@ -1,20 +1,17 @@
-"""Google Colab GPU training script for Persie0/resistor_model.
+"""Google Colab GPU training script for the r1 multi-dataset ResistorBandNetV2 run.
 
 Usage in Colab:
 1. Runtime -> Change runtime type -> GPU.
 2. Run this script/notebook.
 3. Authorize Google Drive when prompted.
-4. Paste a GitHub token with read access to Persie0/resistor_scanner.
 
-Training outputs are stored in Google Drive under
-``MyDrive/resistor_model/rres-v4-colab``. If ``last.pt`` already exists there,
-training automatically resumes from the next epoch. The GitHub token is
-requested with getpass and is never written to disk or printed.
+The three public COCO datasets from the ``r1`` GitHub release are downloaded to
+local Colab storage for training throughput. Checkpoints and reports persist in
+``MyDrive/resistor_model/r1-v2-colab`` and ``last.pt`` is resumed automatically.
 """
 
 from __future__ import annotations
 
-import getpass
 import json
 from pathlib import Path
 import shutil
@@ -23,29 +20,38 @@ import sys
 import urllib.request
 
 
-# -------------------------
-# Settings to tune in Colab
-# -------------------------
 EPOCHS = 100
-BATCH_SIZE = 8              # safe default for a T4; try 12/16 on larger GPUs
+BATCH_SIZE = 8
 OUTPUT_HEIGHT = 128
 OUTPUT_WIDTH = 768
 SEQUENCE_BINS = 256
 BASE_CHANNELS = 48
 D_MODEL = 256
-TRANSFORMER_LAYERS = 4
+TRANSFORMER_LAYERS = 3
 TRANSFORMER_HEADS = 8
 SLOT_DECODER_LAYERS = 2
 CONSISTENCY_WEIGHT = 0.05
+# CTC starts at a much larger raw scale than the primary CE losses; 0.10 keeps it auxiliary.
+CTC_WEIGHT = 0.10
+KL_WEIGHT = 0.03
+LABEL_SMOOTHING = 0.05
 SEED = 42
+
+RELEASE_BASE = "https://github.com/Persie0/resistor_model/releases/download/r1"
+DATASET_ASSETS = (
+    "rres.v4i.coco.zip",
+    "resistor.value.training.v8i.coco.zip",
+    "Deteksi.Nilai.Resistor.v1i.coco.zip",
+)
 
 WORK = Path("/content/resistor_training")
 MODEL_REPO = WORK / "resistor_model"
-DATA_ROOT = WORK / "rres_v4"
+DATA_ROOT = WORK / "r1_datasets"
+DOWNLOAD_ROOT = WORK / "downloads"
 DRIVE_MOUNT = Path("/content/drive")
-RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "rres-v4-colab"
-CONFIG_PATH = WORK / "rres-v4-colab.yaml"
-ZIP_PATH = WORK / "resistor-bandnet-rres-v4-colab.zip"
+RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "r1-v2-colab"
+CONFIG_PATH = WORK / "r1-v2-colab.yaml"
+ZIP_PATH = WORK / "resistor-bandnet-r1-v2-colab.zip"
 
 
 def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
@@ -83,14 +89,12 @@ def mount_drive() -> None:
         from google.colab import drive
     except ImportError as exc:
         raise RuntimeError("Google Drive persistence requires running this script in Google Colab.") from exc
-
     drive.mount(str(DRIVE_MOUNT), force_remount=False)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Persistent run directory: {RUN_DIR}", flush=True)
 
 
 def find_resume_checkpoint(run_dir: Path) -> Path | None:
-    """Return a usable latest checkpoint from persistent storage, if present."""
     checkpoint = Path(run_dir) / "last.pt"
     if checkpoint.is_file() and checkpoint.stat().st_size > 0:
         return checkpoint
@@ -108,44 +112,48 @@ def clone_training_repo() -> None:
 
 
 def install_dependencies() -> None:
-    # Colab already provides CUDA-enabled PyTorch. Do not replace it with a CPU wheel.
+    # Colab already provides CUDA-enabled PyTorch; the V2 default backbone is internal.
     run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
     run([sys.executable, "-m", "pip", "install", "-q", "-e", f"{MODEL_REPO}[export]"])
     run([sys.executable, "-m", "pip", "install", "-q", "pytest"])
 
 
-def download_private_dataset(token: str) -> None:
-    # Keep the image corpus on local Colab storage for training throughput.
+def dataset_roots() -> list[Path]:
+    return [DATA_ROOT / asset.removesuffix(".zip") for asset in DATASET_ASSETS]
+
+
+def download_release_datasets() -> None:
+    """Download and extract all three public r1 COCO datasets to local Colab storage."""
     if DATA_ROOT.exists():
         shutil.rmtree(DATA_ROOT)
     DATA_ROOT.mkdir(parents=True)
-    zip_path = WORK / "rres.v4i.yolov8.zip"
-    url = "https://api.github.com/repos/Persie0/resistor_scanner/contents/rres.v4i.yolov8.zip?ref=tflite"
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.raw+json",
-            "User-Agent": "resistor-model-colab",
-        },
-    )
-    print("Downloading private annotated dataset...", flush=True)
-    with urllib.request.urlopen(request) as response, zip_path.open("wb") as dst:
-        shutil.copyfileobj(response, dst)
-    print(f"Downloaded {zip_path.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
-    shutil.unpack_archive(zip_path, DATA_ROOT)
+    DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    for asset, root in zip(DATASET_ASSETS, dataset_roots(), strict=True):
+        archive = DOWNLOAD_ROOT / asset
+        url = f"{RELEASE_BASE}/{asset}"
+        print(f"Downloading {asset} ...", flush=True)
+        request = urllib.request.Request(url, headers={"User-Agent": "resistor-model-colab"})
+        with urllib.request.urlopen(request) as response, archive.open("wb") as destination:
+            shutil.copyfileobj(response, destination)
+        print(f"Downloaded {asset}: {archive.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
+        root.mkdir(parents=True, exist_ok=True)
+        shutil.unpack_archive(archive, root)
 
 
 def prepare_dataset() -> None:
     manifest = DATA_ROOT / "manifest.jsonl"
     splits = DATA_ROOT / "splits.json"
-    run([
-        sys.executable, "-m", "resistor_model.tools.import_roboflow_yolo",
-        "--root", str(DATA_ROOT),
+    report = DATA_ROOT / "import-report.json"
+    command = [sys.executable, "-m", "resistor_model.tools.import_roboflow_coco"]
+    for root in dataset_roots():
+        command.extend(["--root", str(root)])
+    command.extend([
         "--output", str(manifest),
+        "--report", str(report),
         "--min-bands", "3",
         "--max-bands", "6",
     ])
+    run(command)
     run([
         sys.executable, "-m", "resistor_model.tools.make_splits",
         "--manifest", str(manifest),
@@ -157,7 +165,6 @@ def prepare_dataset() -> None:
 
 
 def build_config(run_dir: Path, resume: Path | None) -> dict:
-    """Build the training config with persistent output/resume paths."""
     return {
         "seed": SEED,
         "data": {
@@ -169,8 +176,15 @@ def build_config(run_dir: Path, resume: Path | None) -> dict:
             "num_workers": 2,
             "group_session": True,
             "split_ratios": [0.70, 0.15, 0.15],
+            "geometric_augment": True,
+            "hflip_prob": 0.5,
+            "vflip_prob": 0.5,
+            "jitter_strength": 1.0,
         },
         "model": {
+            "architecture": "v2",
+            "backbone": "convnext_lite",
+            "pretrained": False,
             "num_colors": 12,
             "max_bands": 6,
             "base_channels": BASE_CHANNELS,
@@ -179,6 +193,8 @@ def build_config(run_dir: Path, resume: Path | None) -> dict:
             "transformer_heads": TRANSFORMER_HEADS,
             "slot_decoder_layers": SLOT_DECODER_LAYERS,
             "dropout": 0.10,
+            "drop_path": 0.10,
+            "conv_kernel": 7,
             "use_chromatic_branch": True,
         },
         "train": {
@@ -202,7 +218,17 @@ def build_config(run_dir: Path, resume: Path | None) -> dict:
             "order": 0.2,
             "count": 0.2,
             "consistency": CONSISTENCY_WEIGHT,
+            "ctc": CTC_WEIGHT,
+            "kl": KL_WEIGHT,
+            "label_smoothing": LABEL_SMOOTHING,
             "body_class_weight": 0.25,
+            "color_balance": "sqrt_inverse",
+            "max_color_weight": 4.0,
+        },
+        "eval": {
+            "extra_decoders": True,
+            # E-series preference is useful for analysis but intentionally not a model-selection bias.
+            "series_bonus": 0.0,
         },
     }
 
@@ -212,23 +238,19 @@ def write_config() -> None:
 
     resume = find_resume_checkpoint(RUN_DIR)
     if resume is None:
-        print("No Drive checkpoint found; starting a fresh training run.", flush=True)
+        print("No r1 V2 Drive checkpoint found; starting a fresh training run.", flush=True)
     else:
         print(f"Resuming from persistent checkpoint: {resume}", flush=True)
-
     cfg = build_config(RUN_DIR, resume)
     text = yaml.safe_dump(cfg, sort_keys=False)
     CONFIG_PATH.write_text(text, encoding="utf-8")
-    # Keep the resolved recipe next to the checkpoints for reproducibility.
     (RUN_DIR / "resolved_config.yaml").write_text(text, encoding="utf-8")
     print(text, flush=True)
 
 
 def train_and_evaluate() -> None:
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    # Tests are short and catch accidental branch/API drift before a long GPU run.
     run([sys.executable, "-m", "pytest", "-q"], cwd=MODEL_REPO)
-    # Training stdout is inherited, so flushed batch/epoch progress appears live in Colab.
     run([sys.executable, "-u", "-m", "resistor_model.train", "--config", str(CONFIG_PATH)])
 
     test_output = run([
@@ -240,28 +262,33 @@ def train_and_evaluate() -> None:
     ], capture=True)
     (RUN_DIR / "test_metrics.txt").write_text(test_output, encoding="utf-8")
 
-    run([
-        "resistor-export",
-        "--checkpoint", str(RUN_DIR / "best.pt"),
-        "--output", str(RUN_DIR / "resistor_bandnet.onnx"),
-    ])
+    try:
+        run([
+            "resistor-export",
+            "--checkpoint", str(RUN_DIR / "best.pt"),
+            "--output", str(RUN_DIR / "resistor_bandnet.onnx"),
+        ])
+    except subprocess.CalledProcessError as exc:
+        # A converter issue must not discard a completed GPU training run.
+        (RUN_DIR / "onnx_export_error.txt").write_text(str(exc), encoding="utf-8")
+        print("ONNX export failed; checkpoints and metrics remain saved in Drive.", flush=True)
 
 
 def summarize() -> None:
     metrics_path = RUN_DIR / "metrics.jsonl"
     raw_rows = [json.loads(line) for line in metrics_path.read_text().splitlines() if line.strip()]
-    # If a user manually reruns from an older checkpoint, keep the newest record per epoch.
     rows_by_epoch = {int(row["epoch"]): row for row in raw_rows}
     rows = [rows_by_epoch[key] for key in sorted(rows_by_epoch)]
     if not rows:
         raise RuntimeError(f"No training metrics found in {metrics_path}")
-    best = max(rows, key=lambda r: (r["val"]["exact_sequence_accuracy"], r["val"]["macro_f1"]))
+    best = max(rows, key=lambda row: (row["val"]["exact_sequence_accuracy"], row["val"]["macro_f1"]))
     summary = {
         "epochs": len(rows),
         "best_epoch": best["epoch"],
         "best_validation": best["val"],
         "last_validation": rows[-1]["val"],
         "persistent_run_dir": str(RUN_DIR),
+        "datasets": list(DATASET_ASSETS),
     }
     (RUN_DIR / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)
@@ -283,15 +310,9 @@ def package_and_download() -> None:
 def main() -> None:
     require_gpu()
     mount_drive()
-    token = getpass.getpass("GitHub token with READ access to Persie0/resistor_scanner: ").strip()
-    if not token:
-        raise RuntimeError("A GitHub token is required because resistor_scanner is private.")
-
     clone_training_repo()
     install_dependencies()
-    download_private_dataset(token)
-    # Avoid retaining the credential longer than needed.
-    token = ""
+    download_release_datasets()
     prepare_dataset()
     write_config()
     train_and_evaluate()
