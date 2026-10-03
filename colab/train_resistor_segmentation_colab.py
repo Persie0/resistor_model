@@ -2,6 +2,10 @@
 
 Uses torchvision LR-ASPP + MobileNetV3-Large and the public m2
 COCO-segmentation release asset. No Ultralytics package is used.
+
+The default recipe trains the architecture from scratch so it does not pull in
+ImageNet-derived pretrained weights. Set USE_PRETRAINED_BACKBONE=True only if
+you have reviewed the applicable pretrained-weight terms for your use case.
 """
 
 from __future__ import annotations
@@ -17,6 +21,10 @@ DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/m2/de
 IMAGE_SIZE = 384
 EPOCHS = 60
 BATCH_SIZE = 16
+USE_PRETRAINED_BACKBONE = False
+# The source Roboflow project uses both names for resistor instances. Collapse
+# them into the single foreground class required by the Android pipeline.
+FOREGROUND_CATEGORIES = ("resistor", "res")
 
 WORK = Path("/content/resistor_segmentation")
 REPO = WORK / "resistor_model"
@@ -120,6 +128,10 @@ def training_command(dataset_root: Path, run_dir: Path, resume: Path | None) -> 
         "--num-workers",
         "2",
     ]
+    for category in FOREGROUND_CATEGORIES:
+        command.extend(["--category", category])
+    if USE_PRETRAINED_BACKBONE:
+        command.append("--pretrained-backbone")
     if resume is not None:
         command.extend(["--resume", str(resume)])
     return command
