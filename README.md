@@ -196,6 +196,12 @@ resistor-export \
 
 The exporter also writes an adjacent JSON metadata file with the model configuration and output names.
 
+## Test whole-resistor segmentation and alignment in Colab
+
+Use `colab/test_resistor_segmentation_alignment_colab.ipynb` after exporting `resistor_segmenter_lraspp.onnx` to the default Drive path. The notebook uploads a photo, runs the whole-resistor segmenter, and estimates the resistor long axis from a weighted consensus of robust `fitLine`, PCA, `minAreaRect`, and the longest convex-hull chord. Angle outliers are rejected before rotation.
+
+It displays the segmentation probability, cleaned mask, detected consensus axis, the final **vertically aligned** crop, and a **horizontal BandNet-ready** crop. The reusable undirected-angle and OpenCV rotation helpers live in `src/resistor_model/alignment.py` and are covered by unit tests.
+
 ## Why the augmentation is different
 
 No arbitrary HSV hue rotation is used because hue is the label. Training instead simulates:
@@ -229,4 +235,4 @@ Evaluate all variants on the normal held-out test set and a manually curated OOD
 pytest -q
 ```
 
-The suite covers manifest parsing, whole-resistor box/polygon metadata, leakage-proof grouped splitting, body-driven rectification, clipped-band target compaction, 3/4/5/6-band bidirectional/ambiguous resistor decoding, dense/slot targets, deterministic augmentation reseeding, chromatic transforms, model output shapes, monotonic loss, backpropagation, consistency loss, per-color/scalar metrics, electrical decode coverage, checkpoint-selection helpers, resume compatibility, configuration merging and YOLO conversion.
+The suite covers manifest parsing, whole-resistor box/polygon metadata, leakage-proof grouped splitting, body-driven rectification, clipped-band target compaction, 3/4/5/6-band bidirectional/ambiguous resistor decoding, dense/slot targets, deterministic augmentation reseeding, chromatic transforms, model output shapes, monotonic loss, backpropagation, consistency loss, per-color/scalar metrics, electrical decode coverage, checkpoint-selection helpers, resume compatibility, configuration merging, YOLO conversion, and resistor-axis alignment helpers.
