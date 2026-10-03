@@ -161,7 +161,7 @@ class CocoResistorSegmentationDataset(Dataset):
         return image_tensor, mask_tensor
 
 
-def build_lraspp_model(*, num_classes: int = 2, pretrained_backbone: bool = True) -> nn.Module:
+def build_lraspp_model(*, num_classes: int = 2, pretrained_backbone: bool = False) -> nn.Module:
     weights_backbone = MobileNet_V3_Large_Weights.IMAGENET1K_V2 if pretrained_backbone else None
     return lraspp_mobilenet_v3_large(
         weights=None,
