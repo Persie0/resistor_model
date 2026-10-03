@@ -15,14 +15,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "torchvision>=0.17", "Pillow>=10"]
 export = ["onnx>=1.16", "onnxscript>=0.1"]
 resnet = ["torchvision>=0.17"]
+segmentation = ["torchvision>=0.17", "Pillow>=10"]
 
 [project.scripts]
 resistor-train = "resistor_model.train:main"
 resistor-evaluate = "resistor_model.evaluate:main"
 resistor-export = "resistor_model.export:main"
+resistor-train-segmentation = "resistor_model.train_segmentation:main"
+resistor-export-segmentation = "resistor_model.export_segmentation:main"
 resistor-audit = "resistor_model.tools.audit_dataset:main"
 resistor-split = "resistor_model.tools.make_splits:main"
 resistor-convert-yolo = "resistor_model.tools.convert_yolo:main"
