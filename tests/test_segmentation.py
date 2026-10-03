@@ -1,3 +1,4 @@
+import inspect
 import json
 from pathlib import Path
 
@@ -43,6 +44,11 @@ def test_coco_dataset_builds_binary_resistor_mask(tmp_path: Path):
     assert mask.dtype == torch.long
     assert int(mask.max()) == 1
     assert int(mask.sum()) > 0
+
+
+def test_lraspp_library_default_does_not_load_pretrained_weights():
+    default = inspect.signature(build_lraspp_model).parameters["pretrained_backbone"].default
+    assert default is False
 
 
 def test_lraspp_returns_two_class_logits_at_input_resolution():
