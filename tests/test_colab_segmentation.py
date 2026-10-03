@@ -26,6 +26,7 @@ def test_colab_training_command_uses_mobile_defaults(tmp_path: Path):
     assert "--image-size 384" in joined
     assert "--epochs 60" in joined
     assert "--batch-size 16" in joined
+    assert "--no-pretrained-backbone" in command
     assert "--resume" not in command
 
 
