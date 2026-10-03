@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
+import resistor_model.train_segmentation as train_segmentation
 from resistor_model.train_segmentation import (
     build_parser,
     evaluate_model,
@@ -74,3 +76,26 @@ def test_progress_message_contains_epoch_batch_loss_lr_and_percent():
     assert "loss 0.1235" in message
     assert "lr 3.00e-04" in message
     assert "12.5s" in message
+
+
+def test_training_logs_before_dataset_initialization(tmp_path: Path, monkeypatch, capsys):
+    args = build_parser().parse_args(
+        [
+            "--dataset-root",
+            str(tmp_path / "dataset"),
+            "--output-dir",
+            str(tmp_path / "run"),
+            "--cpu",
+        ]
+    )
+
+    def fail_dataset(*_args, **_kwargs):
+        raise RuntimeError("dataset probe")
+
+    monkeypatch.setattr(train_segmentation, "CocoResistorSegmentationDataset", fail_dataset)
+    with pytest.raises(RuntimeError, match="dataset probe"):
+        train_segmentation.train(args)
+
+    output = capsys.readouterr().out
+    assert "[startup] device=cpu" in output
+    assert "[startup] loading train dataset" in output
