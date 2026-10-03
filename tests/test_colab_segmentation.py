@@ -26,6 +26,8 @@ def test_colab_training_command_uses_mobile_and_licensing_clean_defaults(tmp_pat
     assert "--image-size 384" in joined
     assert "--epochs 60" in joined
     assert "--batch-size 16" in joined
+    assert "--progress-every 10" in joined
+    assert "--checkpoint-every 5" in joined
     assert "--pretrained-backbone" not in command
     assert command.count("--category") == 2
     assert "resistor" in command
@@ -39,3 +41,9 @@ def test_colab_training_command_resumes_last_checkpoint(tmp_path: Path):
     command = colab.training_command(tmp_path / "dataset", tmp_path / "run", resume)
     assert "--resume" in command
     assert str(resume) in command
+
+
+def test_colab_recipe_packages_persistent_outputs_for_download():
+    colab = _load()
+    assert colab.ZIP_PATH.name == "resistor-segmentation-m2-lraspp.zip"
+    assert callable(colab.package_and_download)

@@ -40,11 +40,20 @@ Defaults:
 - optimizer: AdamW
 - loss: foreground-weighted cross entropy + soft Dice
 - augmentation: flips, 90-degree rotations and conservative color jitter
+- live train and validation progress every `10` batches
 - validation metrics: foreground IoU, Dice and pixel accuracy
 - checkpoint selection: best validation Dice
+- `last.pt` after every completed epoch
+- `best.pt` whenever validation Dice improves
+- `checkpoints/epoch_NNN.pt` every `5` epochs and on the final epoch
+- checkpoints include model, optimizer, scheduler and AMP scaler state
+- append-only `metrics.jsonl` plus final `summary.json`
 - persistence: `MyDrive/resistor_model/segmentation-m2-lraspp`
 - automatic resume from `last.pt`
 - automatic ONNX export of `best.pt`
+- final ZIP package of the complete persistent run directory for download
+
+If the Colab/browser download fails, all checkpoints and metrics remain in Google Drive.
 
 ## Local training
 
@@ -63,6 +72,16 @@ resistor-train-segmentation \
   --category res \
   --output-dir runs/resistor_segmentation
 ```
+
+The defaults print progress every 10 batches and write a numbered checkpoint every 5 epochs. Both can be changed or disabled:
+
+```bash
+resistor-train-segmentation ... \
+  --progress-every 5 \
+  --checkpoint-every 2
+```
+
+Use `0` for either option to disable that behavior.
 
 Export:
 

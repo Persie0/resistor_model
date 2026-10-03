@@ -3,7 +3,13 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from resistor_model.train_segmentation import build_parser, evaluate_model, foreground_metrics
+from resistor_model.train_segmentation import (
+    build_parser,
+    evaluate_model,
+    foreground_metrics,
+    format_training_progress,
+    should_save_periodic_checkpoint,
+)
 
 
 class FixedModel(nn.Module):
@@ -35,3 +41,36 @@ def test_evaluate_model_aggregates_iou_and_dice():
 def test_training_defaults_to_no_pretrained_weights_for_license_cleanliness(tmp_path: Path):
     args = build_parser().parse_args(["--dataset-root", str(tmp_path)])
     assert args.pretrained_backbone is False
+
+
+def test_training_defaults_enable_progress_and_periodic_checkpoints(tmp_path: Path):
+    args = build_parser().parse_args(["--dataset-root", str(tmp_path)])
+    assert args.progress_every == 10
+    assert args.checkpoint_every == 5
+
+
+def test_periodic_checkpoint_saves_interval_and_final_epoch():
+    assert should_save_periodic_checkpoint(5, 60, 5) is True
+    assert should_save_periodic_checkpoint(10, 60, 5) is True
+    assert should_save_periodic_checkpoint(7, 60, 5) is False
+    assert should_save_periodic_checkpoint(60, 60, 5) is True
+    assert should_save_periodic_checkpoint(7, 7, 5) is True
+    assert should_save_periodic_checkpoint(5, 60, 0) is False
+
+
+def test_progress_message_contains_epoch_batch_loss_lr_and_percent():
+    message = format_training_progress(
+        epoch=2,
+        epochs=60,
+        batch=10,
+        batches=40,
+        loss=0.123456,
+        lr=3e-4,
+        elapsed_s=12.5,
+    )
+    assert "epoch 2/60" in message
+    assert "batch 10/40" in message
+    assert "25.0%" in message
+    assert "loss 0.1235" in message
+    assert "lr 3.00e-04" in message
+    assert "12.5s" in message

@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import torch
@@ -48,8 +49,38 @@ def _finalize_metrics(counts: dict[str, float]) -> dict[str, float]:
     }
 
 
+def format_training_progress(
+    *,
+    epoch: int,
+    epochs: int,
+    batch: int,
+    batches: int,
+    loss: float,
+    lr: float,
+    elapsed_s: float,
+) -> str:
+    percent = 100.0 * batch / max(1, batches)
+    return (
+        f"[train] epoch {epoch}/{epochs} | batch {batch}/{batches} ({percent:.1f}%) | "
+        f"loss {loss:.4f} | lr {lr:.2e} | {elapsed_s:.1f}s"
+    )
+
+
+def should_save_periodic_checkpoint(completed_epoch: int, total_epochs: int, every: int) -> bool:
+    if every <= 0:
+        return False
+    return completed_epoch % every == 0 or completed_epoch == total_epochs
+
+
 @torch.no_grad()
-def evaluate_model(model, loader, device: torch.device) -> dict[str, float]:
+def evaluate_model(
+    model,
+    loader,
+    device: torch.device,
+    *,
+    progress_every: int = 0,
+    label: str = "validation",
+) -> dict[str, float]:
     model.eval()
     totals = {
         "loss": 0.0,
@@ -61,7 +92,9 @@ def evaluate_model(model, loader, device: torch.device) -> dict[str, float]:
         "correct": 0.0,
         "pixels": 0.0,
     }
-    for images, masks in loader:
+    total_batches = len(loader) if hasattr(loader, "__len__") else 0
+    started = time.perf_counter()
+    for batch_index, (images, masks) in enumerate(loader, start=1):
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
         logits = model(images)["out"]
@@ -70,6 +103,19 @@ def evaluate_model(model, loader, device: torch.device) -> dict[str, float]:
         batch = foreground_metrics(logits, masks)
         for key, value in batch.items():
             totals[key] += value
+
+        if progress_every > 0 and total_batches and (
+            batch_index % progress_every == 0 or batch_index == total_batches
+        ):
+            current = _finalize_metrics(totals)
+            elapsed = time.perf_counter() - started
+            percent = 100.0 * batch_index / total_batches
+            print(
+                f"[{label}] batch {batch_index}/{total_batches} ({percent:.1f}%) | "
+                f"loss {current['loss']:.4f} | dice {current['dice']:.4f} | "
+                f"iou {current['iou']:.4f} | {elapsed:.1f}s",
+                flush=True,
+            )
     return _finalize_metrics(totals)
 
 
@@ -92,7 +138,18 @@ def _make_loader(dataset, *, batch_size: int, shuffle: bool, num_workers: int, d
     )
 
 
-def _save_checkpoint(path: Path, *, model, optimizer, scheduler, epoch: int, best_dice: float, args) -> None:
+def _save_checkpoint(
+    path: Path,
+    *,
+    model,
+    optimizer,
+    scheduler,
+    scaler,
+    epoch: int,
+    best_dice: float,
+    args,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "architecture": "lraspp_mobilenet_v3_large",
@@ -100,6 +157,7 @@ def _save_checkpoint(path: Path, *, model, optimizer, scheduler, epoch: int, bes
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
             "epoch": epoch,
             "best_dice": best_dice,
             "image_size": int(args.image_size),
@@ -114,6 +172,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir = output_dir / "checkpoints"
 
     train_dataset = CocoResistorSegmentationDataset(
         args.dataset_root,
@@ -165,15 +224,38 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             optimizer.load_state_dict(checkpoint["optimizer"])
         if "scheduler" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler"])
+        if "scaler" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = int(checkpoint.get("epoch", -1)) + 1
         best_dice = float(checkpoint.get("best_dice", -1.0))
+        print(
+            f"[resume] {args.resume} | completed epoch {start_epoch}/{args.epochs} | "
+            f"best dice {best_dice:.4f}",
+            flush=True,
+        )
+
+    print(
+        f"[setup] device={device} | train={len(train_dataset)} | validation={len(val_dataset)} | "
+        f"image={args.image_size} | batch={args.batch_size} | epochs={args.epochs}",
+        flush=True,
+    )
+    print(f"[setup] outputs={output_dir}", flush=True)
+    print(
+        f"[setup] progress every {max(0, args.progress_every)} batches | "
+        f"numbered checkpoint every {max(0, args.checkpoint_every)} epochs",
+        flush=True,
+    )
 
     metrics_path = output_dir / "metrics.jsonl"
     for epoch in range(start_epoch, args.epochs):
+        completed_epoch = epoch + 1
+        print(f"\n[epoch] {completed_epoch}/{args.epochs} starting", flush=True)
+        epoch_started = time.perf_counter()
         model.train()
         running_loss = 0.0
         batches = 0
-        for images, masks in train_loader:
+        total_batches = len(train_loader)
+        for batch_index, (images, masks) in enumerate(train_loader, start=1):
             images = images.to(device, non_blocking=True)
             masks = masks.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
@@ -185,45 +267,103 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             scaler.update()
             running_loss += float(loss.item())
             batches += 1
-        scheduler.step()
 
-        validation = evaluate_model(model, val_loader, device)
+            if args.progress_every > 0 and (
+                batch_index % args.progress_every == 0 or batch_index == total_batches
+            ):
+                print(
+                    format_training_progress(
+                        epoch=completed_epoch,
+                        epochs=args.epochs,
+                        batch=batch_index,
+                        batches=total_batches,
+                        loss=running_loss / max(1, batches),
+                        lr=float(optimizer.param_groups[0]["lr"]),
+                        elapsed_s=time.perf_counter() - epoch_started,
+                    ),
+                    flush=True,
+                )
+
+        validation = evaluate_model(
+            model,
+            val_loader,
+            device,
+            progress_every=max(0, args.progress_every),
+            label="validation",
+        )
+        scheduler.step()
+        epoch_seconds = time.perf_counter() - epoch_started
         row = {
             "epoch": epoch,
+            "completed_epoch": completed_epoch,
             "train_loss": running_loss / max(1, batches),
             "lr": optimizer.param_groups[0]["lr"],
+            "elapsed_seconds": epoch_seconds,
             "validation": validation,
         }
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
-        print(json.dumps(row), flush=True)
 
-        if validation["dice"] > best_dice:
+        improved = validation["dice"] > best_dice
+        if improved:
             best_dice = validation["dice"]
             _save_checkpoint(
                 output_dir / "best.pt",
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
+                scaler=scaler,
                 epoch=epoch,
                 best_dice=best_dice,
                 args=args,
             )
+            print(f"[checkpoint] best.pt updated | dice {best_dice:.4f}", flush=True)
+
         _save_checkpoint(
             output_dir / "last.pt",
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
+            scaler=scaler,
             epoch=epoch,
             best_dice=best_dice,
             args=args,
+        )
+        print(f"[checkpoint] last.pt saved after epoch {completed_epoch}", flush=True)
+
+        if should_save_periodic_checkpoint(completed_epoch, args.epochs, args.checkpoint_every):
+            periodic = checkpoints_dir / f"epoch_{completed_epoch:03d}.pt"
+            _save_checkpoint(
+                periodic,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                epoch=epoch,
+                best_dice=best_dice,
+                args=args,
+            )
+            print(f"[checkpoint] saved {periodic}", flush=True)
+
+        print(
+            f"[epoch] {completed_epoch}/{args.epochs} complete | "
+            f"train loss {row['train_loss']:.4f} | val loss {validation['loss']:.4f} | "
+            f"dice {validation['dice']:.4f} | iou {validation['iou']:.4f} | "
+            f"pixel acc {validation['pixel_accuracy']:.4f} | {epoch_seconds:.1f}s",
+            flush=True,
         )
 
     best_checkpoint = torch.load(output_dir / "best.pt", map_location="cpu")
     model.load_state_dict(best_checkpoint["model"])
     result: dict[str, object] = {
         "best_dice": best_dice,
-        "validation": evaluate_model(model, val_loader, device),
+        "validation": evaluate_model(
+            model,
+            val_loader,
+            device,
+            progress_every=max(0, args.progress_every),
+            label="validation-best",
+        ),
     }
     try:
         test_dataset = CocoResistorSegmentationDataset(
@@ -243,8 +383,16 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             num_workers=args.num_workers,
             device=device,
         )
-        result["test"] = evaluate_model(model, test_loader, device)
+        print(f"[test] evaluating {len(test_dataset)} images with best.pt", flush=True)
+        result["test"] = evaluate_model(
+            model,
+            test_loader,
+            device,
+            progress_every=max(0, args.progress_every),
+            label="test",
+        )
     (output_dir / "summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(f"[done] summary written to {output_dir / 'summary.json'}", flush=True)
     return result
 
 
@@ -276,6 +424,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="Print live train/validation progress every N batches; 0 disables batch progress",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=5,
+        help="Also save checkpoints/epoch_NNN.pt every N completed epochs; 0 disables",
+    )
     parser.add_argument(
         "--pretrained-backbone",
         action="store_true",
