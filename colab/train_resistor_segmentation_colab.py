@@ -17,6 +17,7 @@ import sys
 import time
 import urllib.request
 
+SEGMENTATION_COLAB_VERSION = "2026-10-03-v3"
 MODEL_NAME = "lraspp_mobilenet_v3_large"
 DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/m2/detection_res.v1i.coco-segmentation.zip"
 IMAGE_SIZE = 384
@@ -281,6 +282,7 @@ def package_and_download() -> None:
 
 
 def main() -> None:
+    print(f"Segmentation Colab version: {SEGMENTATION_COLAB_VERSION}", flush=True)
     require_gpu()
     mount_drive()
     clone_repo()
