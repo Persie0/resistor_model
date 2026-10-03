@@ -30,7 +30,7 @@ def test_weighted_consensus_downweights_outlier():
 
 
 def test_rotation_to_vertical_matches_opencv_image_coordinates():
-    assert rotation_to_vertical(-62.9) == 27.1
+    assert math.isclose(rotation_to_vertical(-62.9), 27.1, abs_tol=1e-9)
     assert rotation_to_vertical(0.0) == -90.0
     assert rotation_to_vertical(90.0) == 0.0
 
