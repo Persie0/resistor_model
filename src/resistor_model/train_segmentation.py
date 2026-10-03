@@ -9,7 +9,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from resistor_model.segmentation import CocoResistorSegmentationDataset, build_lraspp_model, segmentation_loss
+from resistor_model.segmentation import (
+    CocoResistorSegmentationDataset,
+    build_lraspp_model,
+    segmentation_loss,
+)
 
 
 def foreground_metrics(logits: torch.Tensor, target: torch.Tensor) -> dict[str, int]:
@@ -21,7 +25,14 @@ def foreground_metrics(logits: torch.Tensor, target: torch.Tensor) -> dict[str, 
     union = int((prediction | truth).sum().item())
     correct = int((prediction == truth).sum().item())
     pixels = int(truth.numel())
-    return {"intersection": intersection, "predicted": predicted, "target": target_count, "union": union, "correct": correct, "pixels": pixels}
+    return {
+        "intersection": intersection,
+        "predicted": predicted,
+        "target": target_count,
+        "union": union,
+        "correct": correct,
+        "pixels": pixels,
+    }
 
 
 def _finalize_metrics(counts: dict[str, float]) -> dict[str, float]:
@@ -40,14 +51,24 @@ def _finalize_metrics(counts: dict[str, float]) -> dict[str, float]:
 @torch.no_grad()
 def evaluate_model(model, loader, device: torch.device) -> dict[str, float]:
     model.eval()
-    totals = {"loss": 0.0, "batches": 0.0, "intersection": 0.0, "predicted": 0.0, "target": 0.0, "union": 0.0, "correct": 0.0, "pixels": 0.0}
+    totals = {
+        "loss": 0.0,
+        "batches": 0.0,
+        "intersection": 0.0,
+        "predicted": 0.0,
+        "target": 0.0,
+        "union": 0.0,
+        "correct": 0.0,
+        "pixels": 0.0,
+    }
     for images, masks in loader:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
         logits = model(images)["out"]
         totals["loss"] += float(segmentation_loss(logits, masks).item())
         totals["batches"] += 1
-        for key, value in foreground_metrics(logits, masks).items():
+        batch = foreground_metrics(logits, masks)
+        for key, value in batch.items():
             totals[key] += value
     return _finalize_metrics(totals)
 
@@ -61,21 +82,31 @@ def _seed_everything(seed: int) -> None:
 
 
 def _make_loader(dataset, *, batch_size: int, shuffle: bool, num_workers: int, device: torch.device):
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=device.type == "cuda", persistent_workers=num_workers > 0)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
+    )
 
 
 def _save_checkpoint(path: Path, *, model, optimizer, scheduler, epoch: int, best_dice: float, args) -> None:
-    torch.save({
-        "architecture": "lraspp_mobilenet_v3_large",
-        "num_classes": 2,
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "epoch": epoch,
-        "best_dice": best_dice,
-        "image_size": int(args.image_size),
-        "category_names": list(args.category) if args.category else None,
-    }, path)
+    torch.save(
+        {
+            "architecture": "lraspp_mobilenet_v3_large",
+            "num_classes": 2,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": epoch,
+            "best_dice": best_dice,
+            "image_size": int(args.image_size),
+            "category_names": list(args.category) if args.category else None,
+        },
+        path,
+    )
 
 
 def train(args: argparse.Namespace) -> dict[str, object]:
@@ -84,18 +115,45 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_dataset = CocoResistorSegmentationDataset(args.dataset_root, "train", image_size=args.image_size, augment=True, category_names=args.category)
-    val_dataset = CocoResistorSegmentationDataset(args.dataset_root, "valid", image_size=args.image_size, augment=False, category_names=args.category)
-    train_loader = _make_loader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, device=device)
-    val_loader = _make_loader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, device=device)
+    train_dataset = CocoResistorSegmentationDataset(
+        args.dataset_root,
+        "train",
+        image_size=args.image_size,
+        augment=True,
+        category_names=args.category,
+    )
+    val_dataset = CocoResistorSegmentationDataset(
+        args.dataset_root,
+        "valid",
+        image_size=args.image_size,
+        augment=False,
+        category_names=args.category,
+    )
+    train_loader = _make_loader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        device=device,
+    )
+    val_loader = _make_loader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        device=device,
+    )
 
-    model = build_lraspp_model(num_classes=2, pretrained_backbone=not args.no_pretrained_backbone).to(device)
+    model = build_lraspp_model(
+        num_classes=2,
+        pretrained_backbone=args.pretrained_backbone,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
     scaler_enabled = args.amp and device.type == "cuda"
     try:
         scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError):  # torch 2.2 compatibility
         scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
     start_epoch = 0
     best_dice = -1.0
@@ -130,33 +188,76 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         scheduler.step()
 
         validation = evaluate_model(model, val_loader, device)
-        row = {"epoch": epoch, "train_loss": running_loss / max(1, batches), "lr": optimizer.param_groups[0]["lr"], "validation": validation}
+        row = {
+            "epoch": epoch,
+            "train_loss": running_loss / max(1, batches),
+            "lr": optimizer.param_groups[0]["lr"],
+            "validation": validation,
+        }
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
         print(json.dumps(row), flush=True)
 
         if validation["dice"] > best_dice:
             best_dice = validation["dice"]
-            _save_checkpoint(output_dir / "best.pt", model=model, optimizer=optimizer, scheduler=scheduler, epoch=epoch, best_dice=best_dice, args=args)
-        _save_checkpoint(output_dir / "last.pt", model=model, optimizer=optimizer, scheduler=scheduler, epoch=epoch, best_dice=best_dice, args=args)
+            _save_checkpoint(
+                output_dir / "best.pt",
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                best_dice=best_dice,
+                args=args,
+            )
+        _save_checkpoint(
+            output_dir / "last.pt",
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            best_dice=best_dice,
+            args=args,
+        )
 
     best_checkpoint = torch.load(output_dir / "best.pt", map_location="cpu")
     model.load_state_dict(best_checkpoint["model"])
-    result: dict[str, object] = {"best_dice": best_dice, "validation": evaluate_model(model, val_loader, device)}
+    result: dict[str, object] = {
+        "best_dice": best_dice,
+        "validation": evaluate_model(model, val_loader, device),
+    }
     try:
-        test_dataset = CocoResistorSegmentationDataset(args.dataset_root, "test", image_size=args.image_size, augment=False, category_names=args.category)
+        test_dataset = CocoResistorSegmentationDataset(
+            args.dataset_root,
+            "test",
+            image_size=args.image_size,
+            augment=False,
+            category_names=args.category,
+        )
     except (FileNotFoundError, ValueError):
         test_dataset = None
     if test_dataset is not None:
-        test_loader = _make_loader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, device=device)
+        test_loader = _make_loader(
+            test_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            device=device,
+        )
         result["test"] = evaluate_model(model, test_loader, device)
     (output_dir / "summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train binary whole-resistor segmentation with LR-ASPP MobileNetV3-Large")
-    parser.add_argument("--dataset-root", type=Path, required=True, help="Extracted Roboflow COCO-segmentation root containing train/valid/test")
+    parser = argparse.ArgumentParser(
+        description="Train binary whole-resistor segmentation with LR-ASPP MobileNetV3-Large"
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        required=True,
+        help="Extracted Roboflow COCO-segmentation root containing train/valid/test",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("runs/resistor_segmentation"))
     parser.add_argument("--image-size", type=int, default=384)
     parser.add_argument("--epochs", type=int, default=60)
@@ -166,9 +267,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foreground-weight", type=float, default=2.0)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--category", action="append", help="COCO category name to treat as foreground; repeat as needed. Default: resistor-named categories when present, otherwise all categories")
+    parser.add_argument(
+        "--category",
+        action="append",
+        help=(
+            "COCO category name to treat as foreground; repeat as needed. "
+            "Default: resistor-named categories when present, otherwise all categories"
+        ),
+    )
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--no-pretrained-backbone", action="store_true")
+    parser.add_argument(
+        "--pretrained-backbone",
+        action="store_true",
+        help=(
+            "Opt in to torchvision ImageNet weights. Torchvision warns pretrained weights may have "
+            "dataset-derived terms; verify them for your use case."
+        ),
+    )
     parser.add_argument("--no-amp", dest="amp", action="store_false")
     parser.set_defaults(amp=True)
     parser.add_argument("--cpu", action="store_true")
@@ -177,7 +292,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    print(json.dumps(train(args), indent=2), flush=True)
+    result = train(args)
+    print(json.dumps(result, indent=2), flush=True)
 
 
 if __name__ == "__main__":
