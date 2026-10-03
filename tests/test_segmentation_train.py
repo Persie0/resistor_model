@@ -1,7 +1,9 @@
+from pathlib import Path
+
 import torch
 from torch import nn
 
-from resistor_model.train_segmentation import evaluate_model, foreground_metrics
+from resistor_model.train_segmentation import build_parser, evaluate_model, foreground_metrics
 
 
 class FixedModel(nn.Module):
@@ -28,3 +30,8 @@ def test_evaluate_model_aggregates_iou_and_dice():
     metrics = evaluate_model(FixedModel(), loader, torch.device("cpu"))
     assert metrics["iou"] == 1.0
     assert metrics["dice"] == 1.0
+
+
+def test_training_defaults_to_no_pretrained_weights_for_license_cleanliness(tmp_path: Path):
+    args = build_parser().parse_args(["--dataset-root", str(tmp_path)])
+    assert args.pretrained_backbone is False
