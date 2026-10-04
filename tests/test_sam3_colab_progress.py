@@ -92,3 +92,10 @@ def test_sam3_processor_methods_are_bfloat16_autocast_safe():
     assert '"add_geometric_prompt"' in bootstrap
     assert autocast in bootstrap
     assert autocast in notebook_code
+
+
+def test_prompt_metadata_is_cast_to_float32_before_numpy_use():
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    assert 'for key in ("scores", "boxes")' in bootstrap
+    assert "value.dtype == torch.bfloat16" in bootstrap
+    assert "result[key] = value.float()" in bootstrap
