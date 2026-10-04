@@ -9,10 +9,17 @@ Keeps Colab's existing NumPy installation untouched. Upstream SAM 3 currently ha
 NumPy <2 dependency constraint, which can downgrade NumPy in Python 3.13 Colab and
 break already-installed binary wheels. We apply the NumPy-2 compatibility change
 locally and install SAM 3 with --no-deps.
+
+SAM 3's image processor currently needs CUDA BF16 autocast around image/prompt
+inference. Without it, set_image() can mix BF16 activations with FP32 linear weights
+and fail with "mat1 and mat2 must have the same dtype". The bootstrap patches the
+processor entry points once so both the quick image test and the later bulk workflow
+use the same safe inference context.
 """
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import subprocess
@@ -98,6 +105,38 @@ def resolve_sam3_checkpoint():
     return checkpoint
 
 
+def patch_sam3_processor_autocast():
+    """Wrap SAM 3 image/prompt entry points in the upstream-required BF16 autocast."""
+    if getattr(Sam3Processor, "_resistor_model_bf16_autocast_patched", False):
+        log("[bootstrap] Sam3Processor BF16 autocast patch already active")
+        return
+
+    method_names = (
+        "set_image",
+        "set_text_prompt",
+        "add_geometric_prompt",
+    )
+
+    for method_name in method_names:
+        original = getattr(Sam3Processor, method_name)
+
+        def make_wrapper(method):
+            @functools.wraps(method)
+            def wrapped(self, *args, **kwargs):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    return method(self, *args, **kwargs)
+
+            return wrapped
+
+        setattr(Sam3Processor, method_name, make_wrapper(original))
+
+    Sam3Processor._resistor_model_bf16_autocast_patched = True
+    log(
+        "[bootstrap] enabled BF16 autocast for Sam3Processor "
+        "set_image/text/geometric prompt inference"
+    )
+
+
 log("=" * 72)
 log("SAM 3.1 single-image test bootstrap")
 log("=" * 72)
@@ -167,10 +206,19 @@ if not torch.cuda.is_available():
         "No CUDA GPU detected. In Colab choose Runtime -> Change runtime type -> GPU."
     )
 
+capability = torch.cuda.get_device_capability(0)
 log(
     f"[bootstrap] GPU: {torch.cuda.get_device_name(0)} | "
-    f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GiB"
+    f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GiB | "
+    f"CUDA capability: {capability[0]}.{capability[1]}"
 )
+if capability[0] < 8:
+    log(
+        "[bootstrap] pre-Ampere GPU detected: Flash Attention stays disabled; "
+        "BF16 autocast is still used to keep SAM 3 tensor dtypes consistent"
+    )
+
+patch_sam3_processor_autocast()
 
 log("[bootstrap 4/5] Resolving open SAM 3.1 checkpoint")
 sam3_checkpoint = resolve_sam3_checkpoint()
