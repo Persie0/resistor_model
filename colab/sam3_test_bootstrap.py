@@ -1,14 +1,14 @@
-"""Minimal Colab bootstrap for testing SAM 3 on one resistor image.
+"""Minimal Colab bootstrap for testing SAM 3.1 on one resistor image.
+
+Uses the open AEmotionStudio/sam3.1 mirror instead of gated facebook/sam3 weights.
+The mirror provides the upstream SAM 3.1 multiplex checkpoint; SAM 3.1 keeps the
+image detector unchanged, so the detector weights can be loaded by
+build_sam3_image_model().
 
 Keeps Colab's existing NumPy installation untouched. Upstream SAM 3 currently has a
 NumPy <2 dependency constraint, which can downgrade NumPy in Python 3.13 Colab and
-break already-installed binary wheels. We apply the upstream NumPy-2 compatibility
-change locally, install SAM 3 with --no-deps, and install only its non-NumPy runtime
-dependencies.
-
-The official SAM 3 checkpoint is gated on Hugging Face. This bootstrap resolves the
-checkpoint explicitly so authorization errors are clear, and also supports an official
-local checkpoint via /content/sam3.pt or the SAM3_CHECKPOINT_PATH environment variable.
+break already-installed binary wheels. We apply the NumPy-2 compatibility change
+locally and install SAM 3 with --no-deps.
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ import time
 from pathlib import Path
 
 SAM3_DIR = Path("/content/sam3")
-SAM3_REPO_ID = "facebook/sam3"
-SAM3_ACCESS_URL = "https://huggingface.co/facebook/sam3"
-SAM3_DEFAULT_CHECKPOINT = Path("/content/sam3.pt")
+SAM3_REPO_ID = "AEmotionStudio/sam3.1"
+SAM3_CHECKPOINT_FILE = "sam3.1_multiplex.pt"
+SAM3_MIRROR_URL = "https://huggingface.co/AEmotionStudio/sam3.1"
+SAM3_DEFAULT_CHECKPOINT = Path("/content/sam3.1_multiplex.pt")
 SAM3_BOOTSTRAPPED = False
 
 
@@ -63,7 +64,7 @@ def patch_sam3_numpy2_compat():
 
 
 def resolve_sam3_checkpoint():
-    """Return an official SAM 3 checkpoint path or raise an actionable access error."""
+    """Return a local SAM 3.1 multiplex checkpoint path from the open mirror."""
     configured = os.environ.get("SAM3_CHECKPOINT_PATH", "").strip()
     if configured:
         checkpoint = Path(configured).expanduser()
@@ -78,38 +79,32 @@ def resolve_sam3_checkpoint():
         log(f"[checkpoint] using local checkpoint: {SAM3_DEFAULT_CHECKPOINT}")
         return str(SAM3_DEFAULT_CHECKPOINT)
 
-    log(f"[checkpoint] checking Hugging Face access to {SAM3_REPO_ID}")
+    log(
+        f"[checkpoint] downloading {SAM3_CHECKPOINT_FILE} from open mirror "
+        f"{SAM3_REPO_ID} (~3.5 GB)"
+    )
     try:
         checkpoint = hf_hub_download(
             repo_id=SAM3_REPO_ID,
-            filename="sam3.pt",
+            filename=SAM3_CHECKPOINT_FILE,
         )
-    except GatedRepoError as exc:
-        raise RuntimeError(
-            "SAM 3 checkpoint access is not enabled for the currently logged-in "
-            "Hugging Face account. Open the model page while logged into the same "
-            f"account and accept/request access:\n  {SAM3_ACCESS_URL}\n\n"
-            "After Hugging Face/Meta grants access, rerun this bootstrap cell. "
-            "You do not need to reinstall or restart Colab.\n\n"
-            "Alternative if you already have the official checkpoint: upload "
-            "sam3.pt to /content/sam3.pt, or set SAM3_CHECKPOINT_PATH to its path."
-        ) from exc
     except HfHubHTTPError as exc:
         raise RuntimeError(
-            f"Could not download the official SAM 3 checkpoint from {SAM3_REPO_ID}. "
-            f"Check Hugging Face login/access at {SAM3_ACCESS_URL}. Original error: {exc}"
+            f"Could not download {SAM3_CHECKPOINT_FILE} from {SAM3_REPO_ID}. "
+            f"Mirror: {SAM3_MIRROR_URL}. Original error: {exc}"
         ) from exc
 
-    log(f"[checkpoint] official SAM 3 checkpoint ready: {checkpoint}")
+    log(f"[checkpoint] SAM 3.1 checkpoint ready: {checkpoint}")
     return checkpoint
 
 
 log("=" * 72)
-log("SAM 3 single-image test bootstrap")
+log("SAM 3.1 single-image test bootstrap")
 log("=" * 72)
 log(f"[bootstrap] Python: {sys.version.split()[0]}")
+log(f"[bootstrap] checkpoint source: {SAM3_REPO_ID}/{SAM3_CHECKPOINT_FILE}")
 
-log("[bootstrap 1/6] Installing non-NumPy runtime dependencies")
+log("[bootstrap 1/5] Installing non-NumPy runtime dependencies")
 run([
     sys.executable,
     "-m",
@@ -117,6 +112,7 @@ run([
     "install",
     "-q",
     "huggingface_hub",
+    "hf_xet",
     "matplotlib",
     "pillow",
     "timm>=1.0.17",
@@ -127,7 +123,7 @@ run([
     "typing_extensions",
 ])
 
-log("[bootstrap 2/6] Preparing official SAM 3 repository")
+log("[bootstrap 2/5] Preparing official SAM 3 code")
 if not SAM3_DIR.is_dir():
     run([
         "git",
@@ -138,10 +134,11 @@ if not SAM3_DIR.is_dir():
         str(SAM3_DIR),
     ])
 else:
-    log("[bootstrap] SAM 3 repository already exists; updating")
-    run(["git", "pull", "--ff-only"], cwd=SAM3_DIR)
+    log("[bootstrap] SAM 3 repository already exists; resetting to latest main")
+    run(["git", "fetch", "--depth", "1", "origin", "main"], cwd=SAM3_DIR)
+    run(["git", "reset", "--hard", "origin/main"], cwd=SAM3_DIR)
 
-log("[bootstrap 3/6] Applying Colab NumPy-2 compatibility patch")
+log("[bootstrap 3/5] Applying Colab NumPy-2 compatibility patch")
 patch_sam3_numpy2_compat()
 run([
     sys.executable,
@@ -158,11 +155,11 @@ if str(SAM3_DIR) not in sys.path:
 
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download, login, notebook_login
-from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError
 from PIL import Image
-from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
+from sam3.model_builder import build_sam3_image_model
 
 log(f"[bootstrap] NumPy kept at runtime version: {np.__version__}")
 if not torch.cuda.is_available():
@@ -175,26 +172,10 @@ log(
     f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GiB"
 )
 
-log("[bootstrap 4/6] Authenticating with Hugging Face")
-token = None
-try:
-    from google.colab import userdata
-
-    token = userdata.get("HF_TOKEN")
-except Exception:
-    token = None
-
-if token:
-    login(token=token, add_to_git_credential=False)
-    log("[bootstrap] authenticated from Colab secret HF_TOKEN")
-else:
-    log("[bootstrap] HF_TOKEN secret not found; opening Hugging Face login")
-    notebook_login()
-
-log("[bootstrap 5/6] Resolving official SAM 3 checkpoint")
+log("[bootstrap 4/5] Resolving open SAM 3.1 checkpoint")
 sam3_checkpoint = resolve_sam3_checkpoint()
 
-log("[bootstrap 6/6] Loading SAM 3 image model")
+log("[bootstrap 5/5] Loading SAM 3.1 detector as image model")
 started = time.monotonic()
 model = build_sam3_image_model(
     checkpoint_path=sam3_checkpoint,
@@ -208,5 +189,5 @@ processor = Sam3Processor(
 )
 SAM3_BOOTSTRAPPED = True
 
-log(f"[bootstrap] SAM 3 ready in {time.monotonic() - started:.1f}s")
+log(f"[bootstrap] SAM 3.1 image model ready in {time.monotonic() - started:.1f}s")
 log("[bootstrap] You can now run the single-image upload test cell.")
