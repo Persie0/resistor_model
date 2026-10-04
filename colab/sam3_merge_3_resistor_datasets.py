@@ -1,8 +1,9 @@
-"""Colab workflow: refine three COCO resistor datasets with SAM 3 and merge them.
+"""Colab workflow: refine three release COCO resistor datasets with SAM 3 and merge them.
 
-Old labels are used only as prompts/comparison. Accepted SAM 3 masks become the new
-truth. Images with no accepted SAM 3 masks are removed. Exact duplicate images are
-removed before an 80/10/10 split.
+The three source datasets are downloaded directly from the resistor_model r1 GitHub
+release. Old labels are used only as prompts/comparison. Accepted SAM 3 masks become
+the new truth. Images with no accepted SAM 3 masks are removed. Exact duplicate
+images are removed before an 80/10/10 split.
 """
 
 import gc
@@ -13,6 +14,7 @@ import random
 import shutil
 import subprocess
 import sys
+import urllib.request
 import zipfile
 from collections import defaultdict
 from pathlib import Path
@@ -44,6 +46,18 @@ OUTPUT_ROOT = "/content/resistor_sam3_merged"
 SAM3_DIR = "/content/sam3"
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
+RELEASE_BASE = "https://github.com/Persie0/resistor_model/releases/download/r1"
+DATASET_ASSETS = (
+    "rres.v4i.coco.zip",
+    "resistor.value.training.v8i.coco.zip",
+    "Deteksi.Nilai.Resistor.v1i.coco.zip",
+)
+DATASET_SHA256 = {
+    "rres.v4i.coco.zip": "24b46548700156a5f553197193c153b42381472b3eddfa2f9cf19d849fc84d4a",
+    "resistor.value.training.v8i.coco.zip": "dbf4b665d361a98d01024481970fc74be27d71e795b95dac5936af94dd4cf958",
+    "Deteksi.Nilai.Resistor.v1i.coco.zip": "ee8db6b64e59dfe47050b313f215051d3da5932dbe5e1f7b7d94e6495449dc92",
+}
+
 
 # ---- Install/load dependencies ------------------------------------------
 run([
@@ -65,7 +79,7 @@ import pandas as pd
 import torch
 from google.colab import files
 from huggingface_hub import login, notebook_login
-from PIL import Image, ImageDraw
+from PIL import Image
 from pycocotools import mask as mask_utils
 from tqdm.auto import tqdm
 from sam3.model_builder import build_sam3_image_model
@@ -87,25 +101,47 @@ else:
     notebook_login()
 
 
-# ---- Upload/extract the three source datasets ----------------------------
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---- Download/extract the three source datasets --------------------------
 shutil.rmtree(WORK_ROOT, ignore_errors=True)
 os.makedirs(WORK_ROOT, exist_ok=True)
-uploaded = files.upload()
-zip_items = [(name, data) for name, data in uploaded.items() if name.lower().endswith(".zip")]
-if len(zip_items) != NUM_DATASETS:
-    raise RuntimeError(f"Upload exactly {NUM_DATASETS} dataset ZIPs; got {len(zip_items)}.")
+
+if len(DATASET_ASSETS) != NUM_DATASETS:
+    raise RuntimeError(f"Expected {NUM_DATASETS} release datasets, configured {len(DATASET_ASSETS)}.")
 
 source_roots = []
-for i, (name, data) in enumerate(zip_items, 1):
-    zp = os.path.join(WORK_ROOT, f"source_{i}.zip")
+for i, asset_name in enumerate(DATASET_ASSETS, 1):
+    url = f"{RELEASE_BASE}/{asset_name}"
+    zip_path = os.path.join(WORK_ROOT, asset_name)
     root = os.path.join(WORK_ROOT, f"source_{i}")
-    with open(zp, "wb") as f:
-        f.write(data)
+
+    print(f"[{i}/{NUM_DATASETS}] Downloading {asset_name}")
+    print(url)
+    urllib.request.urlretrieve(url, zip_path)
+
+    actual_sha = sha256_file(zip_path)
+    expected_sha = DATASET_SHA256[asset_name]
+    if actual_sha.lower() != expected_sha.lower():
+        raise RuntimeError(
+            f"SHA-256 mismatch for {asset_name}: expected {expected_sha}, got {actual_sha}"
+        )
+    print(f"SHA-256 OK: {actual_sha}")
+
     os.makedirs(root, exist_ok=True)
-    with zipfile.ZipFile(zp) as zf:
+    with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(root)
     source_roots.append(root)
-    print(f"[{i}] {name}")
+
+print("Downloaded/extracted release datasets:")
+for root in source_roots:
+    print(" -", root)
 
 
 def looks_like_coco(path):
@@ -133,14 +169,6 @@ def resolve_image(root, json_path, file_name, idx):
     return str(hits[0]) if len(hits) == 1 else None
 
 
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 # ---- Index all annotated images -----------------------------------------
 records = []
 for source_index, root in enumerate(source_roots, 1):
@@ -164,6 +192,7 @@ for source_index, root in enumerate(source_roots, 1):
             if image_path:
                 records.append({
                     "source": source_index,
+                    "source_asset": DATASET_ASSETS[source_index - 1],
                     "image_path": image_path,
                     "file_name": im["file_name"],
                     "annotations": anns,
@@ -300,10 +329,10 @@ for ri, rec in enumerate(tqdm(records, desc="SAM 3 refinement")):
         if good:
             best = max(good, key=lambda c: c["rank"])
             accepted.append(best)
-            manifest_rows.append({"source": rec["source"], "image": rec["file_name"], "old_instance": old_i, "accepted": True, **best["metrics"], "sam_score": best["score"], "match_rank": best["rank"]})
+            manifest_rows.append({"source": rec["source"], "source_asset": rec["source_asset"], "image": rec["file_name"], "old_instance": old_i, "accepted": True, **best["metrics"], "sam_score": best["score"], "match_rank": best["rank"]})
         else:
             best = max(cands, key=lambda c: c["rank"], default=None)
-            row = {"source": rec["source"], "image": rec["file_name"], "old_instance": old_i, "accepted": False}
+            row = {"source": rec["source"], "source_asset": rec["source_asset"], "image": rec["file_name"], "old_instance": old_i, "accepted": False}
             if best:
                 row.update(best["metrics"])
                 row.update(sam_score=best["score"], match_rank=best["rank"])
@@ -361,7 +390,7 @@ for split, items in splits.items():
         ext = Path(rec["image_path"]).suffix.lower() if Path(rec["image_path"]).suffix.lower() in IMG_EXTS else ".jpg"
         name = f"{image_id:06d}_{rec['hash'][:12]}{ext}"
         shutil.copy2(rec["image_path"], image_dir / name)
-        coco_images.append({"id": image_id, "file_name": f"images/{name}", "width": w, "height": h, "source_dataset": rec["source"], "sha256": rec["hash"]})
+        coco_images.append({"id": image_id, "file_name": f"images/{name}", "width": w, "height": h, "source_dataset": rec["source"], "source_asset": rec["source_asset"], "sha256": rec["hash"]})
         semantic = np.zeros((h, w), np.uint8)
         overlay = np.array(image).copy()
         for inst in rec["instances"]:
@@ -383,7 +412,7 @@ for split, items in splits.items():
         Image.fromarray(semantic * 255).save(mask_dir / f"{stem}.png")
         Image.fromarray(overlay).save(overlay_dir / f"{stem}.jpg", quality=92)
     coco = {
-        "info": {"description": "3 resistor datasets refined/merged with SAM 3; final labels are accepted SAM 3 masks only"},
+        "info": {"description": "3 r1 release resistor datasets refined/merged with SAM 3; final labels are accepted SAM 3 masks only"},
         "images": coco_images, "annotations": coco_anns,
         "categories": [{"id": 1, "name": FINAL_CATEGORY_NAME, "supercategory": "electronic_component"}],
     }
@@ -392,7 +421,11 @@ for split, items in splits.items():
 
 manifest.to_csv(Path(OUTPUT_ROOT) / "refinement_manifest.csv", index=False)
 json.dump({
-    "source_records": len(records), "survived_sam": len(refined), "final_unique_images": len(unique),
+    "source_release": "r1",
+    "source_assets": list(DATASET_ASSETS),
+    "source_records": len(records),
+    "survived_sam": len(refined),
+    "final_unique_images": len(unique),
     "splits": summary,
     "thresholds": {"mask_iou": MIN_MASK_IOU, "old_coverage": MIN_OLD_COVERAGE, "sam_coverage": MIN_SAM_COVERAGE, "bbox_iou": MIN_BBOX_IOU},
 }, open(Path(OUTPUT_ROOT) / "summary.json", "w"), indent=2)
