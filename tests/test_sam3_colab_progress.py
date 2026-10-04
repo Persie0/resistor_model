@@ -108,15 +108,30 @@ def test_processor_patch_upgrades_existing_colab_runtime():
     assert 'current_patch_version == SAM3_PROCESSOR_PATCH_VERSION' in bootstrap
 
 
-def test_bulk_refinement_uses_text_prompt_and_selects_one_body_mask_per_source_instance():
+def test_bulk_rebuild_ignores_old_annotations_and_accepts_top_sam_result_per_image():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert 'BODY_TEXT_PROMPT = "resistor body"' in workflow
     assert "processor.set_text_prompt(" in workflow
     assert "prompt=BODY_TEXT_PROMPT" in workflow
-    assert "select_body_assignments" in workflow
-    assert "used_candidate_indices" in workflow
-    assert '"reason": "sam_body_selected"' in workflow
+    assert 'stage(3, 8, "Index source COCO images (annotations ignored)")' in workflow
+    assert '"source_annotations_ignored": True' in workflow
+    assert "best_candidate_index = int(np.argmax(scores))" in workflow
+    assert '"reason": "sam_top_result"' in workflow
+    assert "annotations_by_image" not in workflow
+    assert "SOURCE_CATEGORY_NAMES" not in workflow
+    assert "select_body_assignments" not in workflow
+    assert "comparison_metrics" not in workflow
+    assert "pair_is_plausible" not in workflow
     assert "processor.add_geometric_prompt(" not in workflow
+
+
+def test_bulk_rebuild_indexes_coco_images_without_requiring_annotations():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert 'for image_meta in coco["images"]:' in workflow
+    assert '"image_path": image_path' in workflow
+    assert '"file_name": image_meta["file_name"]' in workflow
+    assert '"annotations": annotations' not in workflow
+    assert "if not annotations" not in workflow
 
 
 def test_single_image_preview_renders_only_selected_highest_score_body_mask():
