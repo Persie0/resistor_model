@@ -33,6 +33,7 @@ SAM3_REPO_ID = "AEmotionStudio/sam3.1"
 SAM3_CHECKPOINT_FILE = "sam3.1_multiplex.pt"
 SAM3_MIRROR_URL = "https://huggingface.co/AEmotionStudio/sam3.1"
 SAM3_DEFAULT_CHECKPOINT = Path("/content/sam3.1_multiplex.pt")
+SAM3_PROCESSOR_PATCH_VERSION = 2
 SAM3_BOOTSTRAPPED = False
 
 
@@ -108,9 +109,28 @@ def resolve_sam3_checkpoint():
 
 def patch_sam3_processor_autocast():
     """Wrap SAM 3 inference in BF16 autocast and normalize NumPy-facing metadata."""
-    if getattr(Sam3Processor, "_resistor_model_bf16_autocast_patched", False):
-        log("[bootstrap] Sam3Processor BF16 autocast patch already active")
+    current_patch_version = getattr(
+        Sam3Processor,
+        "_resistor_model_bf16_autocast_patch_version",
+        0,
+    )
+    if current_patch_version == SAM3_PROCESSOR_PATCH_VERSION:
+        log(
+            f"[bootstrap] Sam3Processor patch v{SAM3_PROCESSOR_PATCH_VERSION} "
+            "already active"
+        )
         return
+
+    if current_patch_version:
+        log(
+            f"[bootstrap] upgrading Sam3Processor patch v{current_patch_version} "
+            f"-> v{SAM3_PROCESSOR_PATCH_VERSION}"
+        )
+    elif getattr(Sam3Processor, "_resistor_model_bf16_autocast_patched", False):
+        log(
+            "[bootstrap] upgrading legacy Sam3Processor BF16 patch "
+            f"-> v{SAM3_PROCESSOR_PATCH_VERSION}"
+        )
 
     method_names = (
         "set_image",
@@ -142,11 +162,13 @@ def patch_sam3_processor_autocast():
         setattr(Sam3Processor, method_name, make_wrapper(original, method_name))
 
     Sam3Processor._resistor_model_bf16_autocast_patched = True
-    log(
-        "[bootstrap] enabled BF16 autocast for Sam3Processor "
-        "set_image/text/geometric prompt inference"
+    Sam3Processor._resistor_model_bf16_autocast_patch_version = (
+        SAM3_PROCESSOR_PATCH_VERSION
     )
-    log("[bootstrap] prompt scores/boxes are normalized to FP32 for NumPy")
+    log(
+        f"[bootstrap] enabled Sam3Processor patch v{SAM3_PROCESSOR_PATCH_VERSION}: "
+        "BF16 autocast + FP32 prompt metadata"
+    )
 
 
 log("=" * 72)
