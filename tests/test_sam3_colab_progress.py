@@ -106,3 +106,23 @@ def test_processor_patch_upgrades_existing_colab_runtime():
     assert 'SAM3_PROCESSOR_PATCH_VERSION = 2' in bootstrap
     assert '_resistor_model_bf16_autocast_patch_version' in bootstrap
     assert 'current_patch_version == SAM3_PROCESSOR_PATCH_VERSION' in bootstrap
+
+
+def test_bulk_refinement_uses_text_prompt_and_selects_one_body_mask_per_source_instance():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert 'BODY_TEXT_PROMPT = "resistor body"' in workflow
+    assert "processor.set_text_prompt(" in workflow
+    assert "prompt=BODY_TEXT_PROMPT" in workflow
+    assert "select_body_assignments" in workflow
+    assert "used_candidate_indices" in workflow
+    assert '"reason": "sam_body_selected"' in workflow
+    assert "processor.add_geometric_prompt(" not in workflow
+
+
+def test_single_image_preview_renders_only_selected_highest_score_body_mask():
+    notebook = NOTEBOOK.read_text(encoding="utf-8")
+    assert "test_best_index = int(np.argmax(test_scores))" in notebook
+    assert "test_best_mask = test_masks[test_best_index]" in notebook
+    assert "test_best_box = test_boxes[test_best_index]" in notebook
+    assert "selected body candidate" in notebook
+    assert "for i, (mask, box, score) in enumerate(zip(test_masks" not in notebook
