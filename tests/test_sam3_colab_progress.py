@@ -134,6 +134,22 @@ def test_bulk_rebuild_indexes_coco_images_without_requiring_annotations():
     assert "if not annotations" not in workflow
 
 
+def test_bulk_rebuild_has_google_drive_resume_checkpoints_and_final_zip_copy():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "from google.colab import drive" in workflow
+    assert 'DRIVE_CHECKPOINT_DIR = Path("/content/drive/MyDrive/resistor_sam3_merge_checkpoint")' in workflow
+    assert "CHECKPOINT_EVERY_IMAGES = 25" in workflow
+    assert "drive.mount(\"/content/drive\")" in workflow
+    assert "load_checkpoint" in workflow
+    assert "save_checkpoint" in workflow
+    assert '"processed_keys"' in workflow
+    assert '"accepted_records"' in workflow
+    assert "checkpoint_masks" in workflow
+    assert "if image_key in processed_keys:" in workflow
+    assert "record_index % CHECKPOINT_EVERY_IMAGES == 0" in workflow
+    assert "shutil.copy2(zip_path, DRIVE_FINAL_ZIP)" in workflow
+
+
 def test_single_image_preview_renders_only_selected_highest_score_body_mask():
     notebook = NOTEBOOK.read_text(encoding="utf-8")
     assert "test_best_index = int(np.argmax(test_scores))" in notebook
