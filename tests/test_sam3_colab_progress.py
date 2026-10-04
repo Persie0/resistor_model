@@ -73,4 +73,4 @@ def test_notebook_reuses_open_sam31_checkpoint_for_full_workflow():
     assert "SAM3_CHECKPOINT_PATH" in notebook
     assert "sam3_checkpoint_for_full" in notebook
     assert "download_ckpt_from_hf" in notebook
-    assert "gated" not in notebook.lower()
+    assert "notebook_login = lambda" in notebook
