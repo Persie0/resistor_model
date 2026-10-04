@@ -1,16 +1,19 @@
 """Colab workflow: refine three release COCO resistor datasets with SAM 3 and merge them.
 
-The three source datasets are downloaded directly from the resistor_model r1 GitHub
-release. Old labels are used only as prompts/comparison. Accepted SAM 3 masks become
-the new truth. Images with no accepted SAM 3 masks are removed. Exact duplicate
-images are removed before an 80/10/10 split.
+Designed for current Google Colab Python 3.13 runtimes without changing the runtime's
+NumPy installation. Upstream SAM 3 still constrains NumPy below 2, so we locally apply
+its NumPy-2 compatibility change and install SAM 3 with --no-deps.
 """
 
+from __future__ import annotations
+
+import csv
 import gc
 import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -20,11 +23,11 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
-
-SAM3_COLAB_VERSION = "2026-10-04-v2"
+SAM3_COLAB_VERSION = "2026-10-04-v3"
 NUM_DATASETS = 3
 FINAL_CATEGORY_NAME = "resistor"
-SOURCE_CATEGORY_NAMES = {"resistor", "resistor_body", "resistors"}
+SOURCE_CATEGORY_NAMES = {"resistor", "resistor_body", "resistors", "res"}
+
 SAM_PROCESSOR_THRESHOLD = 0.15
 MIN_SAM_SCORE = 0.20
 MIN_MASK_IOU = 0.60
@@ -35,15 +38,17 @@ MIN_BOX_ONLY_BBOX_IOU = 0.55
 FINAL_INSTANCE_DUP_IOU = 0.85
 MIN_IMAGE_AREA_FRACTION = 0.00015
 MAX_IMAGE_AREA_FRACTION = 0.80
-TRAIN_FRACTION, VALID_FRACTION, TEST_FRACTION = 0.80, 0.10, 0.10
-SPLIT_SEED = 1337
 
+TRAIN_FRACTION = 0.80
+VALID_FRACTION = 0.10
+TEST_FRACTION = 0.10
+SPLIT_SEED = 1337
 PROGRESS_EVERY_IMAGES = 25
 DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 
-WORK_ROOT = "/content/sam3_merge_work"
-OUTPUT_ROOT = "/content/resistor_sam3_merged"
-SAM3_DIR = "/content/sam3"
+WORK_ROOT = Path("/content/sam3_merge_work")
+OUTPUT_ROOT = Path("/content/resistor_sam3_merged")
+SAM3_DIR = Path("/content/sam3")
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 RELEASE_BASE = "https://github.com/Persie0/resistor_model/releases/download/r1"
@@ -70,15 +75,41 @@ def stage(number, total, title):
     log("=" * 72)
 
 
-def run(cmd, cwd=None):
-    log("+ " + " ".join(map(str, cmd)))
-    subprocess.run(list(map(str, cmd)), cwd=cwd, check=True)
+def run(command, cwd=None):
+    log("+ " + " ".join(map(str, command)))
+    subprocess.run(
+        list(map(str, command)),
+        cwd=str(cwd) if cwd else None,
+        check=True,
+    )
+
+
+def patch_sam3_numpy2_compat():
+    """Keep Colab's NumPy 2.x instead of letting upstream SAM 3 downgrade it."""
+    pyproject = SAM3_DIR / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    original = text
+    text = text.replace('"numpy>=1.26,<2",', '"numpy>=1.26",')
+    text = text.replace('"numpy==1.26",', '"numpy>=1.26",')
+    if text != original:
+        pyproject.write_text(text, encoding="utf-8")
+        log("[setup] relaxed upstream NumPy <2 constraint for Colab Python 3.13")
+    else:
+        log("[setup] SAM 3 NumPy dependency already compatible; no constraint patch needed")
+
+    visualizer = SAM3_DIR / "sam3" / "agent" / "helpers" / "visualizer.py"
+    if visualizer.is_file():
+        source = visualizer.read_text(encoding="utf-8")
+        patched = re.sub(r"\bnp\.bool\b", "np.bool_", source)
+        if patched != source:
+            visualizer.write_text(patched, encoding="utf-8")
+            log("[setup] patched deprecated np.bool usage to np.bool_")
 
 
 def sha256_file(path):
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -89,7 +120,10 @@ def download_with_progress(url, destination, label):
     with urllib.request.urlopen(request) as response, open(destination, "wb") as out:
         total = int(response.headers.get("Content-Length") or 0)
         copied = 0
-        report_step = max(DOWNLOAD_CHUNK_BYTES, total // 10 if total else DOWNLOAD_CHUNK_BYTES)
+        report_step = max(
+            DOWNLOAD_CHUNK_BYTES,
+            total // 10 if total else DOWNLOAD_CHUNK_BYTES,
+        )
         next_report = report_step
 
         if total:
@@ -116,8 +150,8 @@ def download_with_progress(url, destination, label):
                     )
                 else:
                     log(
-                        f"[download] {label}: {copied / 1024 / 1024:.1f} MiB "
-                        f"| {speed:.1f} MiB/s"
+                        f"[download] {label}: "
+                        f"{copied / 1024 / 1024:.1f} MiB | {speed:.1f} MiB/s"
                     )
                 next_report = copied + report_step
 
@@ -128,40 +162,132 @@ def download_with_progress(url, destination, label):
     )
 
 
+def looks_like_coco(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            obj = json.load(handle)
+        return all(
+            isinstance(obj.get(key), list)
+            for key in ("images", "annotations", "categories")
+        )
+    except Exception:
+        return False
+
+
+def basename_index(root):
+    output = defaultdict(list)
+    for path in Path(root).rglob("*"):
+        if path.is_file() and path.suffix.lower() in IMG_EXTS:
+            output[path.name].append(path)
+    return output
+
+
+def resolve_image(root, json_path, file_name, index):
+    file_name = str(file_name).replace("\\", "/")
+    candidates = (
+        Path(json_path).parent / file_name,
+        Path(root) / file_name,
+        Path(json_path).parent / Path(file_name).name,
+    )
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    hits = index.get(Path(file_name).name, [])
+    return str(hits[0]) if len(hits) == 1 else None
+
+
+def write_manifest_csv(path, rows):
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    preferred = [
+        "source",
+        "source_asset",
+        "image",
+        "old_instance",
+        "accepted",
+        "reason",
+        "sam_score",
+        "mask_iou",
+        "old_coverage",
+        "sam_coverage",
+        "bbox_iou",
+        "match_rank",
+    ]
+    fields = [key for key in preferred if any(key in row for row in rows)]
+    extras = sorted({key for row in rows for key in row} - set(fields))
+    fields.extend(extras)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 stage(1, 8, "Environment and dependencies")
 log(f"SAM 3 Colab version: {SAM3_COLAB_VERSION}")
+log(f"[setup] Python: {sys.version.split()[0]}")
+log("[setup] installing non-NumPy runtime dependencies")
 run([
-    sys.executable, "-m", "pip", "install", "-q", "-U",
-    "huggingface_hub", "pycocotools", "opencv-python-headless",
-    "pandas", "tqdm", "matplotlib",
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "-q",
+    "huggingface_hub",
+    "pycocotools",
+    "tqdm",
+    "timm>=1.0.17",
+    "ftfy==6.1.1",
+    "regex",
+    "iopath>=0.1.10",
+    "typing_extensions",
 ])
 
-if not os.path.isdir(SAM3_DIR):
+if not SAM3_DIR.is_dir():
     log("[setup] cloning official SAM 3 repository")
-    run(["git", "clone", "--depth", "1", "https://github.com/facebookresearch/sam3.git", SAM3_DIR])
+    run([
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "https://github.com/facebookresearch/sam3.git",
+        SAM3_DIR,
+    ])
 else:
     log("[setup] SAM 3 repository already present; updating")
     run(["git", "pull", "--ff-only"], cwd=SAM3_DIR)
 
-log("[setup] installing SAM 3")
-run([sys.executable, "-m", "pip", "install", "-q", "-e", SAM3_DIR])
-if SAM3_DIR not in sys.path:
-    sys.path.insert(0, SAM3_DIR)
+log("[setup] applying NumPy-2 compatibility patch")
+patch_sam3_numpy2_compat()
+log("[setup] installing SAM 3 without dependency resolver touching NumPy")
+run([
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "-q",
+    "-e",
+    SAM3_DIR,
+    "--no-deps",
+])
+if str(SAM3_DIR) not in sys.path:
+    sys.path.insert(0, str(SAM3_DIR))
 
-import cv2
 import numpy as np
-import pandas as pd
 import torch
 from google.colab import files
 from huggingface_hub import login, notebook_login
 from PIL import Image
 from pycocotools import mask as mask_utils
-from tqdm.auto import tqdm
-from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
+from sam3.model_builder import build_sam3_image_model
+from tqdm.auto import tqdm
 
+log(f"[setup] NumPy kept at runtime version: {np.__version__}")
 if not torch.cuda.is_available():
-    raise RuntimeError("Switch Colab to a GPU runtime and rerun.")
+    raise RuntimeError(
+        "No CUDA GPU detected. In Colab choose Runtime -> Change runtime type -> GPU."
+    )
 
 gpu_name = torch.cuda.get_device_name(0)
 props = torch.cuda.get_device_properties(0)
@@ -172,9 +298,10 @@ stage(2, 8, "Hugging Face authentication")
 token = None
 try:
     from google.colab import userdata
+
     token = userdata.get("HF_TOKEN")
 except Exception:
-    pass
+    token = None
 
 if token:
     login(token=token, add_to_git_credential=False)
@@ -186,66 +313,40 @@ else:
 
 stage(3, 8, "Download and extract the 3 release datasets")
 shutil.rmtree(WORK_ROOT, ignore_errors=True)
-os.makedirs(WORK_ROOT, exist_ok=True)
+WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 if len(DATASET_ASSETS) != NUM_DATASETS:
-    raise RuntimeError(f"Expected {NUM_DATASETS} release datasets, configured {len(DATASET_ASSETS)}.")
+    raise RuntimeError(
+        f"Expected {NUM_DATASETS} release datasets, configured {len(DATASET_ASSETS)}."
+    )
 
 source_roots = []
-for i, asset_name in enumerate(DATASET_ASSETS, 1):
+for index, asset_name in enumerate(DATASET_ASSETS, 1):
     url = f"{RELEASE_BASE}/{asset_name}"
-    zip_path = os.path.join(WORK_ROOT, asset_name)
-    root = os.path.join(WORK_ROOT, f"source_{i}")
+    zip_path = WORK_ROOT / asset_name
+    root = WORK_ROOT / f"source_{index}"
 
-    log(f"[dataset {i}/{NUM_DATASETS}] {asset_name}")
+    log(f"[dataset {index}/{NUM_DATASETS}] {asset_name}")
     download_with_progress(url, zip_path, asset_name)
 
-    log(f"[dataset {i}/{NUM_DATASETS}] verifying SHA-256")
+    log(f"[dataset {index}/{NUM_DATASETS}] verifying SHA-256")
     actual_sha = sha256_file(zip_path)
     expected_sha = DATASET_SHA256[asset_name]
     if actual_sha.lower() != expected_sha.lower():
         raise RuntimeError(
-            f"SHA-256 mismatch for {asset_name}: expected {expected_sha}, got {actual_sha}"
+            f"SHA-256 mismatch for {asset_name}: "
+            f"expected {expected_sha}, got {actual_sha}"
         )
-    log(f"[dataset {i}/{NUM_DATASETS}] checksum OK")
+    log(f"[dataset {index}/{NUM_DATASETS}] checksum OK")
 
-    os.makedirs(root, exist_ok=True)
-    log(f"[dataset {i}/{NUM_DATASETS}] extracting")
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(root)
+    root.mkdir(parents=True, exist_ok=True)
+    log(f"[dataset {index}/{NUM_DATASETS}] extracting")
+    with zipfile.ZipFile(zip_path) as archive:
+        archive.extractall(root)
     source_roots.append(root)
-    log(f"[dataset {i}/{NUM_DATASETS}] ready: {root}")
+    log(f"[dataset {index}/{NUM_DATASETS}] ready: {root}")
 
 log("[datasets] all 3 release datasets are ready")
-
-
-def looks_like_coco(path):
-    try:
-        obj = json.load(open(path, encoding="utf-8"))
-        return all(isinstance(obj.get(k), list) for k in ("images", "annotations", "categories"))
-    except Exception:
-        return False
-
-
-def basename_index(root):
-    out = defaultdict(list)
-    for p in Path(root).rglob("*"):
-        if p.is_file() and p.suffix.lower() in IMG_EXTS:
-            out[p.name].append(p)
-    return out
-
-
-def resolve_image(root, json_path, file_name, idx):
-    fn = str(file_name).replace("\\", "/")
-    for p in (
-        Path(json_path).parent / fn,
-        Path(root) / fn,
-        Path(json_path).parent / Path(fn).name,
-    ):
-        if p.is_file():
-            return str(p)
-    hits = idx.get(Path(fn).name, [])
-    return str(hits[0]) if len(hits) == 1 else None
 
 
 stage(4, 8, "Index annotated COCO images")
@@ -253,73 +354,109 @@ records = []
 for source_index, root in enumerate(source_roots, 1):
     asset_name = DATASET_ASSETS[source_index - 1]
     log(f"[index {source_index}/{NUM_DATASETS}] scanning {asset_name}")
-    json_paths = [str(p) for p in Path(root).rglob("*.json") if looks_like_coco(p)]
+    json_paths = [
+        str(path)
+        for path in Path(root).rglob("*.json")
+        if looks_like_coco(path)
+    ]
     if not json_paths:
         raise RuntimeError(f"No COCO JSON found in source {source_index}.")
 
-    idx = basename_index(root)
+    name_index = basename_index(root)
     before = len(records)
     source_annotations = 0
+
     for json_path in sorted(json_paths):
-        coco = json.load(open(json_path, encoding="utf-8"))
-        cats = {c["id"]: str(c.get("name", "")).lower() for c in coco["categories"]}
-        allowed = {cid for cid, name in cats.items() if name in SOURCE_CATEGORY_NAMES} or set(cats)
-        anns_by_image = defaultdict(list)
-        for ann in coco["annotations"]:
-            if ann.get("category_id") in allowed:
-                anns_by_image[ann["image_id"]].append(ann)
-        for im in coco["images"]:
-            anns = anns_by_image.get(im["id"], [])
-            if not anns:
+        with open(json_path, encoding="utf-8") as handle:
+            coco = json.load(handle)
+
+        categories = {
+            category["id"]: str(category.get("name", "")).strip().lower()
+            for category in coco["categories"]
+        }
+        allowed = {
+            category_id
+            for category_id, name in categories.items()
+            if name in SOURCE_CATEGORY_NAMES
+        } or set(categories)
+
+        annotations_by_image = defaultdict(list)
+        for annotation in coco["annotations"]:
+            if annotation.get("category_id") in allowed:
+                annotations_by_image[annotation["image_id"]].append(annotation)
+
+        for image_meta in coco["images"]:
+            annotations = annotations_by_image.get(image_meta["id"], [])
+            if not annotations:
                 continue
-            image_path = resolve_image(root, json_path, im["file_name"], idx)
+            image_path = resolve_image(
+                root,
+                json_path,
+                image_meta["file_name"],
+                name_index,
+            )
             if image_path:
-                source_annotations += len(anns)
+                source_annotations += len(annotations)
                 records.append({
                     "source": source_index,
                     "source_asset": asset_name,
                     "image_path": image_path,
-                    "file_name": im["file_name"],
-                    "annotations": anns,
+                    "file_name": image_meta["file_name"],
+                    "annotations": annotations,
                 })
+
     source_images = len(records) - before
     log(
-        f"[index {source_index}/{NUM_DATASETS}] {source_images} annotated images | "
-        f"{source_annotations} source annotations | {len(json_paths)} COCO JSON file(s)"
+        f"[index {source_index}/{NUM_DATASETS}] "
+        f"{source_images} annotated images | "
+        f"{source_annotations} source annotations | "
+        f"{len(json_paths)} COCO JSON file(s)"
     )
 
 log(
     f"[index] complete | {len(records)} annotated source image records | "
-    f"{sum(len(r['annotations']) for r in records)} total source annotations"
+    f"{sum(len(record['annotations']) for record in records)} total source annotations"
 )
 
 
 def box_from_mask(mask):
     ys, xs = np.where(mask > 0)
     if not len(xs):
-        return np.array([0, 0, 0, 0], np.float32)
-    return np.array([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], np.float32)
+        return np.array([0, 0, 0, 0], dtype=np.float32)
+    return np.array(
+        [xs.min(), ys.min(), xs.max() + 1, ys.max() + 1],
+        dtype=np.float32,
+    )
 
 
-def bbox_iou(a, b):
-    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
-    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    aa = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
-    ab = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
-    return float(inter / (aa + ab - inter)) if aa + ab - inter else 0.0
+def bbox_iou(first, second):
+    x1 = max(float(first[0]), float(second[0]))
+    y1 = max(float(first[1]), float(second[1]))
+    x2 = min(float(first[2]), float(second[2]))
+    y2 = min(float(first[3]), float(second[3]))
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    first_area = max(0.0, float(first[2] - first[0])) * max(
+        0.0, float(first[3] - first[1])
+    )
+    second_area = max(0.0, float(second[2] - second[0])) * max(
+        0.0, float(second[3] - second[1])
+    )
+    union = first_area + second_area - intersection
+    return float(intersection / union) if union else 0.0
 
 
-def decode_old(ann, h, w):
-    seg = ann.get("segmentation")
-    if seg:
+def decode_old(annotation, height, width):
+    segmentation = annotation.get("segmentation")
+    if segmentation:
         try:
-            if isinstance(seg, list):
-                rle = mask_utils.merge(mask_utils.frPyObjects(seg, h, w))
+            if isinstance(segmentation, list):
+                rle = mask_utils.merge(
+                    mask_utils.frPyObjects(segmentation, height, width)
+                )
             else:
-                rle = dict(seg)
+                rle = dict(segmentation)
                 if isinstance(rle.get("counts"), list):
-                    rle = mask_utils.frPyObjects(rle, h, w)
+                    rle = mask_utils.frPyObjects(rle, height, width)
                 elif isinstance(rle.get("counts"), str):
                     rle["counts"] = rle["counts"].encode("ascii")
             mask = mask_utils.decode(rle)
@@ -331,65 +468,74 @@ def decode_old(ann, h, w):
         except Exception:
             pass
 
-    mask = np.zeros((h, w), np.uint8)
-    if "bbox" not in ann:
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if "bbox" not in annotation:
         return mask, True
 
-    x, y, bw, bh = map(float, ann["bbox"])
-    x1, y1 = max(0, int(x)), max(0, int(y))
-    x2, y2 = min(w, int(np.ceil(x + bw))), min(h, int(np.ceil(y + bh)))
+    x, y, box_width, box_height = map(float, annotation["bbox"])
+    x1 = max(0, int(np.floor(x)))
+    y1 = max(0, int(np.floor(y)))
+    x2 = min(width, int(np.ceil(x + box_width)))
+    y2 = min(height, int(np.ceil(y + box_height)))
     mask[y1:y2, x1:x2] = 1
     return mask, True
 
 
-def metrics(old, sam):
-    a, b = old.astype(bool), sam.astype(bool)
-    inter = float(np.logical_and(a, b).sum())
-    aa, bb = float(a.sum()), float(b.sum())
+def comparison_metrics(old_mask, sam_mask):
+    old = old_mask.astype(bool)
+    sam = sam_mask.astype(bool)
+    intersection = float(np.logical_and(old, sam).sum())
+    old_area = float(old.sum())
+    sam_area = float(sam.sum())
+    union = old_area + sam_area - intersection
     return {
-        "mask_iou": inter / (aa + bb - inter) if aa + bb - inter else 0.0,
-        "old_coverage": inter / aa if aa else 0.0,
-        "sam_coverage": inter / bb if bb else 0.0,
-        "bbox_iou": bbox_iou(box_from_mask(old), box_from_mask(sam)),
+        "mask_iou": intersection / union if union else 0.0,
+        "old_coverage": intersection / old_area if old_area else 0.0,
+        "sam_coverage": intersection / sam_area if sam_area else 0.0,
+        "bbox_iou": bbox_iou(box_from_mask(old_mask), box_from_mask(sam_mask)),
     }
 
 
-def matches(m, bbox_only):
+def candidate_matches(metrics, bbox_only):
     if bbox_only:
-        return m["bbox_iou"] >= MIN_BOX_ONLY_BBOX_IOU
-    return m["mask_iou"] >= MIN_MASK_IOU or (
-        m["old_coverage"] >= MIN_OLD_COVERAGE
-        and m["sam_coverage"] >= MIN_SAM_COVERAGE
-        and m["bbox_iou"] >= MIN_BBOX_IOU
+        return metrics["bbox_iou"] >= MIN_BOX_ONLY_BBOX_IOU
+    return (
+        metrics["mask_iou"] >= MIN_MASK_IOU
+        or (
+            metrics["old_coverage"] >= MIN_OLD_COVERAGE
+            and metrics["sam_coverage"] >= MIN_SAM_COVERAGE
+            and metrics["bbox_iou"] >= MIN_BBOX_IOU
+        )
     )
 
 
-def rank(m, score, bbox_only):
+def candidate_rank(metrics, score, bbox_only):
     if bbox_only:
-        return 0.8 * m["bbox_iou"] + 0.2 * score
+        return 0.8 * metrics["bbox_iou"] + 0.2 * score
     return (
-        0.5 * m["mask_iou"]
-        + 0.2 * min(m["old_coverage"], m["sam_coverage"])
-        + 0.15 * m["bbox_iou"]
+        0.5 * metrics["mask_iou"]
+        + 0.2 * min(metrics["old_coverage"], metrics["sam_coverage"])
+        + 0.15 * metrics["bbox_iou"]
         + 0.15 * score
     )
 
 
-def mask_iou(a, b):
-    a, b = a.astype(bool), b.astype(bool)
-    inter = np.logical_and(a, b).sum()
-    union = np.logical_or(a, b).sum()
-    return float(inter / union) if union else 0.0
+def mask_iou(first, second):
+    first = first.astype(bool)
+    second = second.astype(bool)
+    intersection = np.logical_and(first, second).sum()
+    union = np.logical_or(first, second).sum()
+    return float(intersection / union) if union else 0.0
 
 
 def dedup_instances(instances):
     kept = []
-    for inst in sorted(instances, key=lambda x: x["rank"], reverse=True):
+    for instance in sorted(instances, key=lambda item: item["rank"], reverse=True):
         if not any(
-            mask_iou(inst["mask"], k["mask"]) >= FINAL_INSTANCE_DUP_IOU
-            for k in kept
+            mask_iou(instance["mask"], existing["mask"]) >= FINAL_INSTANCE_DUP_IOU
+            for existing in kept
         ):
-            kept.append(inst)
+            kept.append(instance)
     return kept
 
 
@@ -428,66 +574,89 @@ progress = tqdm(
     dynamic_ncols=True,
 )
 
-for ri, rec in enumerate(records, 1):
-    image = Image.open(rec["image_path"]).convert("RGB")
-    w, h = image.size
+for record_index, record in enumerate(records, 1):
+    image = Image.open(record["image_path"]).convert("RGB")
+    width, height = image.size
     state = processor.set_image(image)
     accepted = []
 
-    for old_i, ann in enumerate(rec["annotations"]):
-        old, bbox_only = decode_old(ann, h, w)
-        if not old.any():
+    for old_index, annotation in enumerate(record["annotations"]):
+        old_mask, bbox_only = decode_old(annotation, height, width)
+        if not old_mask.any():
             rejected_instances_total += 1
             manifest_rows.append({
-                "source": rec["source"],
-                "source_asset": rec["source_asset"],
-                "image": rec["file_name"],
-                "old_instance": old_i,
+                "source": record["source"],
+                "source_asset": record["source_asset"],
+                "image": record["file_name"],
+                "old_instance": old_index,
                 "accepted": False,
                 "reason": "empty_source_annotation",
             })
             continue
 
-        x1, y1, x2, y2 = box_from_mask(old)
+        x1, y1, x2, y2 = box_from_mask(old_mask)
         prompt_box = [
-            ((x1 + x2) / 2) / w,
-            ((y1 + y2) / 2) / h,
-            max(1, x2 - x1) / w,
-            max(1, y2 - y1) / h,
+            ((x1 + x2) / 2) / width,
+            ((y1 + y2) / 2) / height,
+            max(1.0, x2 - x1) / width,
+            max(1.0, y2 - y1) / height,
         ]
+
         processor.reset_all_prompts(state)
-        out = processor.add_geometric_prompt(box=prompt_box, label=True, state=state)
-        masks = out["masks"].squeeze(1).detach().cpu().numpy().astype(np.uint8)
-        scores = out["scores"].detach().cpu().numpy().astype(float)
+        output = processor.add_geometric_prompt(
+            box=prompt_box,
+            label=True,
+            state=state,
+        )
+
+        masks = (
+            output["masks"]
+            .squeeze(1)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.uint8)
+        )
+        scores = output["scores"].detach().cpu().numpy().astype(float)
 
         candidates = []
-        for mask, score in zip(masks, scores):
-            score = float(score)
-            frac = float(mask.sum() / (h * w))
+        for sam_mask, sam_score in zip(masks, scores):
+            sam_score = float(sam_score)
+            area_fraction = float(sam_mask.sum() / max(1, height * width))
             if (
-                score < MIN_SAM_SCORE
-                or not mask.any()
-                or not (MIN_IMAGE_AREA_FRACTION <= frac <= MAX_IMAGE_AREA_FRACTION)
+                sam_score < MIN_SAM_SCORE
+                or not sam_mask.any()
+                or not (
+                    MIN_IMAGE_AREA_FRACTION
+                    <= area_fraction
+                    <= MAX_IMAGE_AREA_FRACTION
+                )
             ):
                 continue
-            m = metrics(old, mask)
+
+            metrics = comparison_metrics(old_mask, sam_mask)
             candidates.append({
-                "mask": mask,
-                "score": score,
-                "metrics": m,
-                "rank": rank(m, score, bbox_only),
+                "mask": sam_mask,
+                "score": sam_score,
+                "metrics": metrics,
+                "rank": candidate_rank(metrics, sam_score, bbox_only),
             })
 
-        good = [c for c in candidates if matches(c["metrics"], bbox_only)]
-        if good:
-            best = max(good, key=lambda c: c["rank"])
+        matches = [
+            candidate
+            for candidate in candidates
+            if candidate_matches(candidate["metrics"], bbox_only)
+        ]
+
+        if matches:
+            best = max(matches, key=lambda candidate: candidate["rank"])
             accepted.append(best)
             accepted_instances_total += 1
             manifest_rows.append({
-                "source": rec["source"],
-                "source_asset": rec["source_asset"],
-                "image": rec["file_name"],
-                "old_instance": old_i,
+                "source": record["source"],
+                "source_asset": record["source_asset"],
+                "image": record["file_name"],
+                "old_instance": old_index,
                 "accepted": True,
                 **best["metrics"],
                 "sam_score": best["score"],
@@ -495,25 +664,32 @@ for ri, rec in enumerate(records, 1):
             })
         else:
             rejected_instances_total += 1
-            best = max(candidates, key=lambda c: c["rank"], default=None)
+            best = max(
+                candidates,
+                key=lambda candidate: candidate["rank"],
+                default=None,
+            )
             row = {
-                "source": rec["source"],
-                "source_asset": rec["source_asset"],
-                "image": rec["file_name"],
-                "old_instance": old_i,
+                "source": record["source"],
+                "source_asset": record["source_asset"],
+                "image": record["file_name"],
+                "old_instance": old_index,
                 "accepted": False,
                 "reason": "no_sam_match",
             }
             if best:
                 row.update(best["metrics"])
-                row.update(sam_score=best["score"], match_rank=best["rank"])
+                row.update(
+                    sam_score=best["score"],
+                    match_rank=best["rank"],
+                )
             manifest_rows.append(row)
 
     accepted = dedup_instances(accepted)
     if accepted:
         refined.append({
-            **rec,
-            "hash": sha256_file(rec["image_path"]),
+            **record,
+            "hash": sha256_file(record["image_path"]),
             "instances": accepted,
         })
 
@@ -527,28 +703,27 @@ for ri, rec in enumerate(records, 1):
     )
 
     if (
-        ri == 1
-        or ri % PROGRESS_EVERY_IMAGES == 0
-        or ri == len(records)
+        record_index == 1
+        or record_index % PROGRESS_EVERY_IMAGES == 0
+        or record_index == len(records)
     ):
         elapsed = max(0.001, time.monotonic() - refine_started)
-        rate = ri / elapsed
-        remaining = (len(records) - ri) / rate if rate else 0.0
+        rate = record_index / elapsed
+        remaining = (len(records) - record_index) / rate if rate else 0.0
         log(
-            f"[sam3] {ri}/{len(records)} images ({100.0 * ri / max(1, len(records)):.1f}%) "
+            f"[sam3] {record_index}/{len(records)} images "
+            f"({100.0 * record_index / max(1, len(records)):.1f}%) "
             f"| kept images {len(refined)} "
             f"| accepted instances {accepted_instances_total} "
             f"| rejected instances {rejected_instances_total} "
             f"| {rate:.2f} img/s | ETA {remaining / 60:.1f} min"
         )
 
-    if ri % 50 == 0:
+    if record_index % 50 == 0:
         gc.collect()
         torch.cuda.empty_cache()
 
 progress.close()
-
-manifest = pd.DataFrame(manifest_rows)
 log(
     f"[sam3] complete | kept {len(refined)}/{len(records)} image records | "
     f"accepted {accepted_instances_total} instances | "
@@ -559,17 +734,17 @@ log(
 
 stage(6, 8, "Deduplicate and split final images")
 by_hash = defaultdict(list)
-for rec in refined:
-    by_hash[rec["hash"]].append(rec)
+for record in refined:
+    by_hash[record["hash"]].append(record)
 
 unique = []
 for group in by_hash.values():
     unique.append(
         max(
             group,
-            key=lambda r: (
-                len(r["instances"]),
-                np.mean([i["rank"] for i in r["instances"]]),
+            key=lambda record: (
+                len(record["instances"]),
+                np.mean([item["rank"] for item in record["instances"]]),
             ),
         )
     )
@@ -587,97 +762,111 @@ log(
 
 rng = random.Random(SPLIT_SEED)
 rng.shuffle(unique)
-n = len(unique)
-n_train = min(n, int(round(n * TRAIN_FRACTION)))
-n_valid = min(n - n_train, int(round(n * VALID_FRACTION)))
+count = len(unique)
+train_count = min(count, int(round(count * TRAIN_FRACTION)))
+valid_count = min(
+    count - train_count,
+    int(round(count * VALID_FRACTION)),
+)
 splits = {
-    "train": unique[:n_train],
-    "valid": unique[n_train:n_train + n_valid],
-    "test": unique[n_train + n_valid:],
+    "train": unique[:train_count],
+    "valid": unique[train_count:train_count + valid_count],
+    "test": unique[train_count + valid_count:],
 }
+
 for split_name, items in splits.items():
     log(
         f"[split] {split_name}: {len(items)} images | "
-        f"{sum(len(r['instances']) for r in items)} instances"
+        f"{sum(len(record['instances']) for record in items)} instances"
     )
 
 
 stage(7, 8, "Export merged COCO dataset, masks, and QA overlays")
 shutil.rmtree(OUTPUT_ROOT, ignore_errors=True)
-os.makedirs(OUTPUT_ROOT, exist_ok=True)
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 summary = {}
 
-for split_index, (split, items) in enumerate(splits.items(), 1):
-    log(f"[export {split_index}/3] {split}: starting {len(items)} images")
-    base = Path(OUTPUT_ROOT) / split
+for split_index, (split_name, items) in enumerate(splits.items(), 1):
+    log(f"[export {split_index}/3] {split_name}: starting {len(items)} images")
+    base = OUTPUT_ROOT / split_name
     image_dir = base / "images"
     mask_dir = base / "masks_semantic"
     overlay_dir = base / "overlays"
-    for d in (image_dir, mask_dir, overlay_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    for directory in (image_dir, mask_dir, overlay_dir):
+        directory.mkdir(parents=True, exist_ok=True)
 
-    coco_images, coco_anns, ann_id = [], [], 1
+    coco_images = []
+    coco_annotations = []
+    annotation_id = 1
+
     export_progress = tqdm(
         items,
         total=len(items),
-        desc=f"Export {split}",
+        desc=f"Export {split_name}",
         unit="image",
         dynamic_ncols=True,
     )
 
-    for image_id, rec in enumerate(export_progress, 1):
-        image = Image.open(rec["image_path"]).convert("RGB")
-        w, h = image.size
-        suffix = Path(rec["image_path"]).suffix.lower()
-        ext = suffix if suffix in IMG_EXTS else ".jpg"
-        name = f"{image_id:06d}_{rec['hash'][:12]}{ext}"
+    for image_id, record in enumerate(export_progress, 1):
+        image = Image.open(record["image_path"]).convert("RGB")
+        width, height = image.size
+        suffix = Path(record["image_path"]).suffix.lower()
+        extension = suffix if suffix in IMG_EXTS else ".jpg"
+        output_name = f"{image_id:06d}_{record['hash'][:12]}{extension}"
 
-        shutil.copy2(rec["image_path"], image_dir / name)
+        shutil.copy2(record["image_path"], image_dir / output_name)
         coco_images.append({
             "id": image_id,
-            "file_name": f"images/{name}",
-            "width": w,
-            "height": h,
-            "source_dataset": rec["source"],
-            "source_asset": rec["source_asset"],
-            "sha256": rec["hash"],
+            "file_name": f"images/{output_name}",
+            "width": width,
+            "height": height,
+            "source_dataset": record["source"],
+            "source_asset": record["source_asset"],
+            "sha256": record["hash"],
         })
 
-        semantic = np.zeros((h, w), np.uint8)
+        semantic = np.zeros((height, width), dtype=np.uint8)
         overlay = np.array(image).copy()
 
-        for inst in rec["instances"]:
-            mask = inst["mask"]
+        for instance in record["instances"]:
+            mask = instance["mask"]
             semantic = np.maximum(semantic, mask)
-            overlay[mask.astype(bool)] = (
-                0.55 * overlay[mask.astype(bool)] + 0.45 * 255
+            mask_bool = mask.astype(bool)
+            overlay[mask_bool] = (
+                0.55 * overlay[mask_bool] + 0.45 * 255
             ).astype(np.uint8)
 
             rle = coco_rle(mask)
-            rr = {
+            binary_rle = {
                 "size": rle["size"],
                 "counts": rle["counts"].encode("ascii"),
             }
-            coco_anns.append({
-                "id": ann_id,
+            coco_annotations.append({
+                "id": annotation_id,
                 "image_id": image_id,
                 "category_id": 1,
                 "segmentation": rle,
                 "area": float(mask.sum()),
-                "bbox": [float(x) for x in mask_utils.toBbox(rr)],
+                "bbox": [
+                    float(value)
+                    for value in mask_utils.toBbox(binary_rle)
+                ],
                 "iscrowd": 0,
-                "sam3_score": inst["score"],
-                "old_sam_mask_iou": inst["metrics"]["mask_iou"],
-                "old_coverage": inst["metrics"]["old_coverage"],
-                "sam_coverage": inst["metrics"]["sam_coverage"],
-                "old_sam_bbox_iou": inst["metrics"]["bbox_iou"],
-                "match_rank": inst["rank"],
+                "sam3_score": instance["score"],
+                "old_sam_mask_iou": instance["metrics"]["mask_iou"],
+                "old_coverage": instance["metrics"]["old_coverage"],
+                "sam_coverage": instance["metrics"]["sam_coverage"],
+                "old_sam_bbox_iou": instance["metrics"]["bbox_iou"],
+                "match_rank": instance["rank"],
             })
-            ann_id += 1
+            annotation_id += 1
 
-        stem = Path(name).stem
+        stem = Path(output_name).stem
         Image.fromarray(semantic * 255).save(mask_dir / f"{stem}.png")
-        Image.fromarray(overlay).save(overlay_dir / f"{stem}.jpg", quality=92)
+        Image.fromarray(overlay).save(
+            overlay_dir / f"{stem}.jpg",
+            quality=92,
+        )
 
     coco = {
         "info": {
@@ -687,27 +876,30 @@ for split_index, (split, items) in enumerate(splits.items(), 1):
             )
         },
         "images": coco_images,
-        "annotations": coco_anns,
+        "annotations": coco_annotations,
         "categories": [{
             "id": 1,
             "name": FINAL_CATEGORY_NAME,
             "supercategory": "electronic_component",
         }],
     }
-    with open(base / "_annotations.coco.json", "w", encoding="utf-8") as f:
-        json.dump(coco, f)
+    with open(base / "_annotations.coco.json", "w", encoding="utf-8") as handle:
+        json.dump(coco, handle)
 
-    summary[split] = {
+    summary[split_name] = {
         "images": len(coco_images),
-        "instances": len(coco_anns),
+        "instances": len(coco_annotations),
     }
     log(
-        f"[export {split_index}/3] {split}: complete | "
-        f"{len(coco_images)} images | {len(coco_anns)} instances"
+        f"[export {split_index}/3] {split_name}: complete | "
+        f"{len(coco_images)} images | {len(coco_annotations)} instances"
     )
 
-manifest.to_csv(Path(OUTPUT_ROOT) / "refinement_manifest.csv", index=False)
-with open(Path(OUTPUT_ROOT) / "summary.json", "w", encoding="utf-8") as f:
+write_manifest_csv(
+    OUTPUT_ROOT / "refinement_manifest.csv",
+    manifest_rows,
+)
+with open(OUTPUT_ROOT / "summary.json", "w", encoding="utf-8") as handle:
     json.dump({
         "source_release": "r1",
         "source_assets": list(DATASET_ASSETS),
@@ -722,7 +914,7 @@ with open(Path(OUTPUT_ROOT) / "summary.json", "w", encoding="utf-8") as f:
             "sam_coverage": MIN_SAM_COVERAGE,
             "bbox_iou": MIN_BBOX_IOU,
         },
-    }, f, indent=2)
+    }, handle, indent=2)
 
 log("[export] summary")
 log(json.dumps(summary, indent=2))
