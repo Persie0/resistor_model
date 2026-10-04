@@ -14,7 +14,8 @@ SAM 3's image processor currently needs CUDA BF16 autocast around image/prompt
 inference. Without it, set_image() can mix BF16 activations with FP32 linear weights
 and fail with "mat1 and mat2 must have the same dtype". The bootstrap patches the
 processor entry points once so both the quick image test and the later bulk workflow
-use the same safe inference context.
+use the same safe inference context. Prompt metadata returned as BF16 (scores/boxes)
+is converted back to FP32 so NumPy conversion works on Colab.
 """
 
 from __future__ import annotations
@@ -106,7 +107,7 @@ def resolve_sam3_checkpoint():
 
 
 def patch_sam3_processor_autocast():
-    """Wrap SAM 3 image/prompt entry points in the upstream-required BF16 autocast."""
+    """Wrap SAM 3 inference in BF16 autocast and normalize NumPy-facing metadata."""
     if getattr(Sam3Processor, "_resistor_model_bf16_autocast_patched", False):
         log("[bootstrap] Sam3Processor BF16 autocast patch already active")
         return
@@ -120,21 +121,32 @@ def patch_sam3_processor_autocast():
     for method_name in method_names:
         original = getattr(Sam3Processor, method_name)
 
-        def make_wrapper(method):
+        def make_wrapper(method, wrapped_method_name):
             @functools.wraps(method)
             def wrapped(self, *args, **kwargs):
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    return method(self, *args, **kwargs)
+                    result = method(self, *args, **kwargs)
+
+                # Keep BF16 image state/features intact, but normalize prompt metadata
+                # that is consumed by NumPy later. NumPy has no native BF16 dtype.
+                if wrapped_method_name != "set_image" and isinstance(result, dict):
+                    for key in ("scores", "boxes"):
+                        value = result.get(key)
+                        if torch.is_tensor(value) and value.dtype == torch.bfloat16:
+                            result[key] = value.float()
+
+                return result
 
             return wrapped
 
-        setattr(Sam3Processor, method_name, make_wrapper(original))
+        setattr(Sam3Processor, method_name, make_wrapper(original, method_name))
 
     Sam3Processor._resistor_model_bf16_autocast_patched = True
     log(
         "[bootstrap] enabled BF16 autocast for Sam3Processor "
         "set_image/text/geometric prompt inference"
     )
+    log("[bootstrap] prompt scores/boxes are normalized to FP32 for NumPy")
 
 
 log("=" * 72)
