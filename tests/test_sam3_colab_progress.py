@@ -36,3 +36,18 @@ def test_single_image_test_comes_before_full_dataset_workflow():
     )
 
     assert bootstrap_index < test_index < workflow_index
+
+
+def test_colab_setup_keeps_existing_numpy_abi():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+
+    for text in (workflow, bootstrap):
+        assert "patch_sam3_numpy2_compat" in text
+        assert '"--no-deps"' in text
+        assert '"numpy"' not in text
+
+    assert "import pandas" not in workflow
+    assert "import cv2" not in workflow
+    assert '"pandas"' not in workflow
+    assert '"opencv-python-headless"' not in workflow
