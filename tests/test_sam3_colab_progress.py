@@ -146,7 +146,7 @@ def test_bulk_rebuild_has_google_drive_resume_checkpoints_and_final_zip_copy():
     assert '"accepted_records"' in workflow
     assert "checkpoint_masks" in workflow
     assert "if image_key in processed_keys:" in workflow
-    assert "record_index % CHECKPOINT_EVERY_IMAGES == 0" in workflow
+    assert "processed_this_run % CHECKPOINT_EVERY_IMAGES == 0" in workflow
     assert "shutil.copy2(zip_path, DRIVE_FINAL_ZIP)" in workflow
 
 
