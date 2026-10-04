@@ -53,12 +53,30 @@ def test_colab_setup_keeps_existing_numpy_abi():
     assert '"opencv-python-headless"' not in workflow
 
 
-def test_bootstrap_handles_gated_access_and_supports_local_checkpoint():
+def test_bootstrap_uses_open_sam31_mirror_and_supports_local_checkpoint():
     text = BOOTSTRAP.read_text(encoding="utf-8")
-    assert "SAM3_ACCESS_URL" in text
+    assert 'SAM3_REPO_ID = "AEmotionStudio/sam3.1"' in text
+    assert 'SAM3_CHECKPOINT_FILE = "sam3.1_multiplex.pt"' in text
     assert "SAM3_CHECKPOINT_PATH" in text
     assert "resolve_sam3_checkpoint" in text
     assert "hf_hub_download" in text
-    assert "GatedRepoError" in text
+    assert "GatedRepoError" not in text
+    assert "notebook_login" not in text
     assert "load_from_HF=False" in text
     assert "checkpoint_path=sam3_checkpoint" in text
+
+
+def test_full_workflow_uses_same_sam31_checkpoint_without_hidden_hf_download():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert 'SAM3_REPO_ID = "AEmotionStudio/sam3.1"' in text
+    assert 'SAM3_CHECKPOINT_FILE = "sam3.1_multiplex.pt"' in text
+    assert "resolve_sam3_checkpoint" in text
+    assert "checkpoint_path=sam3_checkpoint" in text
+    assert "load_from_HF=False" in text
+
+
+def test_notebook_reuses_bootstrap_checkpoint_for_full_workflow():
+    notebook = NOTEBOOK.read_text(encoding="utf-8")
+    assert "AEmotionStudio/sam3.1" in notebook
+    assert "SAM3_CHECKPOINT_PATH" in notebook
+    assert "sam3_checkpoint_for_full" in notebook
