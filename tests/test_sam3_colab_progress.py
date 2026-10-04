@@ -74,3 +74,19 @@ def test_notebook_reuses_open_sam31_checkpoint_for_full_workflow():
     assert "sam3_checkpoint_for_full" in notebook
     assert "download_ckpt_from_hf" in notebook
     assert "notebook_login = lambda" in notebook
+
+
+def test_sam3_image_inference_uses_bfloat16_autocast():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    notebook_code = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    )
+
+    autocast = 'torch.autocast(device_type="cuda", dtype=torch.bfloat16)'
+    assert autocast in workflow
+    assert autocast in notebook_code
+    assert "processor.set_image" in workflow
+    assert "processor.set_text_prompt" in notebook_code
