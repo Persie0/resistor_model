@@ -51,3 +51,17 @@ def test_colab_setup_keeps_existing_numpy_abi():
     assert "import cv2" not in workflow
     assert '"pandas"' not in workflow
     assert '"opencv-python-headless"' not in workflow
+
+
+def test_sam3_gated_access_is_checked_explicitly_and_local_checkpoint_is_supported():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+
+    for text in (workflow, bootstrap):
+        assert "SAM3_ACCESS_URL" in text
+        assert "SAM3_CHECKPOINT_PATH" in text
+        assert "resolve_sam3_checkpoint" in text
+        assert "hf_hub_download" in text
+        assert "GatedRepoError" in text
+        assert "load_from_HF=False" in text
+        assert "checkpoint_path=sam3_checkpoint" in text
