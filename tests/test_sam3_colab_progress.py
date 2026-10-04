@@ -76,8 +76,8 @@ def test_notebook_reuses_open_sam31_checkpoint_for_full_workflow():
     assert "notebook_login = lambda" in notebook
 
 
-def test_sam3_image_inference_uses_bfloat16_autocast():
-    workflow = WORKFLOW.read_text(encoding="utf-8")
+def test_sam3_processor_methods_are_bfloat16_autocast_safe():
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     notebook_code = "\n".join(
         "".join(cell.get("source", []))
@@ -86,7 +86,9 @@ def test_sam3_image_inference_uses_bfloat16_autocast():
     )
 
     autocast = 'torch.autocast(device_type="cuda", dtype=torch.bfloat16)'
-    assert autocast in workflow
+    assert "patch_sam3_processor_autocast" in bootstrap
+    assert '"set_image"' in bootstrap
+    assert '"set_text_prompt"' in bootstrap
+    assert '"add_geometric_prompt"' in bootstrap
+    assert autocast in bootstrap
     assert autocast in notebook_code
-    assert "processor.set_image" in workflow
-    assert "processor.set_text_prompt" in notebook_code
