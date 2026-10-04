@@ -42,11 +42,11 @@ def test_colab_setup_keeps_existing_numpy_abi():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    for text in (workflow, bootstrap):
-        assert "patch_sam3_numpy2_compat" in text
-        assert '"--no-deps"' in text
-        assert '"numpy"' not in text
-
+    assert "patch_sam3_numpy2_compat" in bootstrap
+    assert '"--no-deps"' in bootstrap
+    assert '"numpy"' not in bootstrap
+    assert "ensure_sam3_ready" in workflow
+    assert "sam3_test_bootstrap.py" in workflow
     assert "import pandas" not in workflow
     assert "import cv2" not in workflow
     assert '"pandas"' not in workflow
