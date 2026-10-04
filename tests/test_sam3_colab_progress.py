@@ -99,3 +99,10 @@ def test_prompt_metadata_is_cast_to_float32_before_numpy_use():
     assert 'for key in ("scores", "boxes")' in bootstrap
     assert "value.dtype == torch.bfloat16" in bootstrap
     assert "result[key] = value.float()" in bootstrap
+
+
+def test_processor_patch_upgrades_existing_colab_runtime():
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    assert 'SAM3_PROCESSOR_PATCH_VERSION = 2' in bootstrap
+    assert '_resistor_model_bf16_autocast_patch_version' in bootstrap
+    assert 'current_patch_version == SAM3_PROCESSOR_PATCH_VERSION' in bootstrap
