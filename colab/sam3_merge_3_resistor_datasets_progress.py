@@ -12,6 +12,7 @@ import runpy
 import shutil
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -35,7 +36,7 @@ def _download_main_script() -> None:
 def _install_download_progress() -> None:
     def visible_urlretrieve(url, filename=None, reporthook=None, data=None):
         if filename is None:
-            filename = os.path.basename(urllib.request.urlparse(url).path) or "/content/download.bin"
+            filename = os.path.basename(urllib.parse.urlparse(url).path) or "/content/download.bin"
         destination = Path(filename)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -87,11 +88,13 @@ def _install_download_progress() -> None:
                 if reporthook is not None:
                     reporthook(max(1, copied // DOWNLOAD_CHUNK_BYTES), DOWNLOAD_CHUNK_BYTES, total)
 
+            headers = response.headers
+
         print(
             f"[download] {destination.name} complete | {copied / 1024 / 1024:.1f} MiB",
             flush=True,
         )
-        return str(destination), response.headers
+        return str(destination), headers
 
     urllib.request.urlretrieve = visible_urlretrieve
 
@@ -101,7 +104,7 @@ def _install_extraction_progress() -> None:
 
     def visible_extractall(self, path=None, members=None, pwd=None):
         target = Path(path or os.getcwd())
-        member_count = len(members) if members is not None else len(self.infolist())
+        member_count = len(members) if members is not None and hasattr(members, "__len__") else len(self.infolist())
         print(
             f"[extract] {Path(self.filename).name} -> {target} | {member_count} files",
             flush=True,
