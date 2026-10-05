@@ -110,7 +110,7 @@ def test_processor_patch_upgrades_existing_colab_runtime():
 
 def test_bulk_rebuild_ignores_old_annotations_and_accepts_top_sam_result_per_image():
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert 'BODY_TEXT_PROMPT = "resistor body"' in workflow
+    assert 'BODY_TEXT_PROMPT = "ceramic axial resistor body, not smd resistor"' in workflow
     assert "processor.set_text_prompt(" in workflow
     assert "prompt=BODY_TEXT_PROMPT" in workflow
     assert 'stage(3, 8, "Index source COCO images (annotations ignored)")' in workflow
@@ -123,6 +123,14 @@ def test_bulk_rebuild_ignores_old_annotations_and_accepts_top_sam_result_per_ima
     assert "comparison_metrics" not in workflow
     assert "pair_is_plausible" not in workflow
     assert "processor.add_geometric_prompt(" not in workflow
+
+
+def test_bulk_rebuild_requires_60_percent_confidence_for_acceptance():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "MIN_ACCEPT_SCORE = 0.60" in workflow
+    assert "best_score = float(scores[best_candidate_index])" in workflow
+    assert "best_score >= MIN_ACCEPT_SCORE" in workflow
+    assert '"min_accept_score": MIN_ACCEPT_SCORE' in workflow
 
 
 def test_bulk_rebuild_indexes_coco_images_without_requiring_annotations():
