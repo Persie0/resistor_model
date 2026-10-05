@@ -2,8 +2,9 @@
 
 The source COCO files are used only as image lists. Existing annotations, categories,
 boxes, and segmentations are deliberately ignored. SAM 3.1 runs the text prompt
-``resistor body`` once per image and the highest-confidence returned mask becomes the
-new single resistor segmentation for that image. Images with no SAM result are
+``ceramic axial resistor body, not smd resistor`` once per image. The
+highest-confidence returned mask becomes the new single resistor segmentation only
+when its score is at least 0.60. Images without a >=60% axial-resistor result are
 omitted.
 
 Progress is checkpointed to Google Drive every 25 processed images. Checkpoints keep
@@ -28,8 +29,9 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
-SAM3_COLAB_VERSION = "2026-10-05-v6-top-sam-drive-checkpoint"
-BODY_TEXT_PROMPT = "resistor body"
+SAM3_COLAB_VERSION = "2026-10-05-v7-axial-60pct"
+BODY_TEXT_PROMPT = "ceramic axial resistor body, not smd resistor"
+MIN_ACCEPT_SCORE = 0.60
 NUM_DATASETS = 3
 FINAL_CATEGORY_NAME = "resistor"
 
@@ -180,7 +182,6 @@ def resolve_image(root, json_path, file_name, index):
     if len(hits) == 1:
         return str(hits[0].resolve())
 
-    # If duplicate basenames exist, prefer the path whose suffix matches the COCO path.
     target = raw_name.lower().lstrip("./")
     suffix_hits = []
     for path in hits:
@@ -225,8 +226,9 @@ def load_checkpoint(valid_keys):
     if (
         state.get("workflow_version") != SAM3_COLAB_VERSION
         or state.get("prompt") != BODY_TEXT_PROMPT
+        or state.get("min_accept_score") != MIN_ACCEPT_SCORE
     ):
-        log("[checkpoint] existing checkpoint belongs to a different workflow version; starting fresh")
+        log("[checkpoint] existing checkpoint uses different prompt/threshold/version; starting fresh")
         return set(), [], 0
 
     processed_keys = set(state.get("processed_keys", [])) & valid_keys
@@ -241,13 +243,12 @@ def load_checkpoint(valid_keys):
             accepted_records.append(item)
             accepted_keys.add(key)
         else:
-            # Accepted results require their persisted mask; rerun if it is missing.
             processed_keys.discard(key)
 
     rejected_count = max(0, len(processed_keys - accepted_keys))
     log(
         f"[checkpoint] resumed {len(processed_keys)} processed images | "
-        f"{len(accepted_records)} accepted | {rejected_count} no-result"
+        f"{len(accepted_records)} accepted | {rejected_count} rejected"
     )
     return processed_keys, accepted_records, rejected_count
 
@@ -265,6 +266,7 @@ def save_checkpoint(processed_keys, accepted_records, pending_mask_names):
     state = {
         "workflow_version": SAM3_COLAB_VERSION,
         "prompt": BODY_TEXT_PROMPT,
+        "min_accept_score": MIN_ACCEPT_SCORE,
         "processed_keys": sorted(processed_keys),
         "accepted_records": accepted_records,
         "processed_count": len(processed_keys),
@@ -302,7 +304,7 @@ def write_manifest_csv(path, records, processed_keys):
             rows.append({
                 "image_key": image_key,
                 "accepted": False,
-                "reason": "no_sam_result",
+                "reason": "below_60pct_or_no_sam_result",
             })
     fields = [
         "image_key", "source", "source_asset", "image", "accepted", "reason",
@@ -337,6 +339,7 @@ LOCAL_CHECKPOINT_MASK_DIR.mkdir(parents=True, exist_ok=True)
 log(f"[checkpoint] Drive folder: {DRIVE_CHECKPOINT_DIR}")
 log(f"[checkpoint] cadence: every {CHECKPOINT_EVERY_IMAGES} processed images")
 log(f"[sam3] prompt: {BODY_TEXT_PROMPT!r}")
+log(f"[sam3] minimum acceptance score: {MIN_ACCEPT_SCORE:.0%}")
 log(f"[sam3] GPU: {torch.cuda.get_device_name(0)}")
 
 
@@ -412,8 +415,6 @@ valid_keys = set(record_by_key)
 processed_keys, accepted_records, rejected_count = load_checkpoint(valid_keys)
 accepted_by_key = {record["image_key"]: record for record in accepted_records}
 
-# Refresh paths from this run's extracted datasets so resumed metadata never depends on
-# the previous Colab VM's filesystem.
 for image_key, accepted in list(accepted_by_key.items()):
     current = record_by_key[image_key]
     accepted["image_path"] = current["image_path"]
@@ -422,7 +423,7 @@ for image_key, accepted in list(accepted_by_key.items()):
     accepted["source_asset"] = current["source_asset"]
 
 
-stage(4, 8, "Accept highest-confidence SAM 3.1 resistor-body result per image")
+stage(4, 8, "Accept >=60%-confidence SAM 3.1 axial-resistor result per image")
 log(
     f"[sam3] source annotations/categories are ignored | {len(records)} images | "
     f"{len(processed_keys)} already checkpointed"
@@ -430,7 +431,7 @@ log(
 refine_started = time.monotonic()
 pending_mask_names = set()
 processed_this_run = 0
-progress = tqdm(total=len(records), initial=len(processed_keys), desc="SAM 3.1 top body mask", unit="image", dynamic_ncols=True)
+progress = tqdm(total=len(records), initial=len(processed_keys), desc="SAM 3.1 axial body mask", unit="image", dynamic_ncols=True)
 
 for record_index, record in enumerate(records, 1):
     image_key = record["image_key"]
@@ -450,8 +451,9 @@ for record_index, record in enumerate(records, 1):
     accepted = None
     if len(scores) > 0:
         best_candidate_index = int(np.argmax(scores))
+        best_score = float(scores[best_candidate_index])
         best_mask = masks[best_candidate_index]
-        if best_mask.any():
+        if best_score >= MIN_ACCEPT_SCORE and best_mask.any():
             mask_filename = f"{stable_key_hash(image_key)}.png"
             Image.fromarray(best_mask * 255).save(LOCAL_CHECKPOINT_MASK_DIR / mask_filename)
             pending_mask_names.add(mask_filename)
@@ -462,7 +464,7 @@ for record_index, record in enumerate(records, 1):
                 "image_path": record["image_path"],
                 "file_name": record["file_name"],
                 "mask_filename": mask_filename,
-                "score": float(scores[best_candidate_index]),
+                "score": best_score,
                 "text_detection_index": best_candidate_index,
                 "hash": sha256_file(record["image_path"]),
                 "reason": "sam_top_result",
@@ -480,7 +482,7 @@ for record_index, record in enumerate(records, 1):
     progress.update(1)
     progress.set_postfix(
         accepted=len(accepted_records),
-        no_result=rejected_count,
+        rejected=rejected_count,
         checkpointed=len(processed_keys) - processed_this_run % CHECKPOINT_EVERY_IMAGES,
         refresh=False,
     )
@@ -501,19 +503,18 @@ for record_index, record in enumerate(records, 1):
         log(
             f"[sam3] {total_done}/{len(records)} images "
             f"({100.0 * total_done / len(records):.1f}%) | accepted {len(accepted_records)} | "
-            f"no result {rejected_count} | {rate:.2f} new img/s | ETA {eta / 60:.1f} min"
+            f"rejected {rejected_count} | {rate:.2f} new img/s | ETA {eta / 60:.1f} min"
         )
 
     if processed_this_run % 50 == 0:
         gc.collect()
         torch.cuda.empty_cache()
 
-# Persist a partial final batch too.
 save_checkpoint(processed_keys, accepted_records, pending_mask_names)
 progress.close()
 log(
     f"[sam3] inference complete | processed {len(processed_keys)}/{len(records)} | "
-    f"accepted {len(accepted_records)} | no result {rejected_count}"
+    f"accepted {len(accepted_records)} | rejected {rejected_count}"
 )
 
 
@@ -524,7 +525,7 @@ for record in accepted_records:
 
 unique = [max(group, key=lambda item: item["score"]) for group in by_hash.values()]
 if not unique:
-    raise RuntimeError("SAM 3.1 returned no usable resistor-body mask for any source image.")
+    raise RuntimeError("No >=60%-confidence ceramic axial resistor body mask was accepted.")
 
 duplicates_removed = len(accepted_records) - len(unique)
 rng = random.Random(SPLIT_SEED)
@@ -608,11 +609,12 @@ for split_index, (split_name, items) in enumerate(splits.items(), 1):
     coco = {
         "info": {
             "description": (
-                "Three r1 COCO image sets rebuilt with exactly the highest-confidence "
-                "SAM 3.1 text-prompt 'resistor body' result per accepted image. "
+                "Three r1 COCO image sets rebuilt with the highest-confidence >=60% "
+                "SAM 3.1 ceramic axial resistor-body result per accepted image. "
                 "All source annotations and categories were ignored."
             ),
             "sam3_prompt": BODY_TEXT_PROMPT,
+            "min_accept_score": MIN_ACCEPT_SCORE,
             "source_annotations_ignored": True,
         },
         "images": coco_images,
@@ -634,11 +636,12 @@ with open(OUTPUT_ROOT / "summary.json", "w", encoding="utf-8") as handle:
         "source_release": "r1",
         "source_assets": list(DATASET_ASSETS),
         "sam3_prompt": BODY_TEXT_PROMPT,
+        "min_accept_score": MIN_ACCEPT_SCORE,
         "source_annotations_ignored": True,
         "source_images": len(records),
         "processed_images": len(processed_keys),
         "accepted_images": len(accepted_records),
-        "no_result_images": rejected_count,
+        "rejected_images": rejected_count,
         "final_unique_images": len(unique),
         "exact_duplicate_records_removed": duplicates_removed,
         "splits": summary,
@@ -657,4 +660,4 @@ shutil.copy2(zip_path, DRIVE_FINAL_ZIP)
 log(f"[package] created {zip_path} ({zip_size:.1f} MiB)")
 log(f"[package] copied final ZIP to Google Drive: {DRIVE_FINAL_ZIP}")
 files.download(zip_path)
-log("[done] top-result SAM 3.1 COCO merge finished")
+log("[done] >=60%-confidence axial-resistor SAM 3.1 COCO merge finished")
