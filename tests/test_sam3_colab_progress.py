@@ -142,6 +142,18 @@ def test_bulk_rebuild_indexes_coco_images_without_requiring_annotations():
     assert "if not annotations" not in workflow
 
 
+def test_bulk_inference_uses_quality_neutral_hot_loop_optimizations():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    stage4 = workflow.split('stage(4, 8, "Accept', 1)[1].split('stage(5, 8, "Deduplicate', 1)[0]
+    stage5 = workflow.split('stage(5, 8, "Deduplicate', 1)[1].split('stage(6, 8, "Export', 1)[0]
+
+    assert "with torch.inference_mode():" in stage4
+    assert "gc.collect()" not in stage4
+    assert "torch.cuda.empty_cache()" not in stage4
+    assert 'sha256_file(record["image_path"])' not in stage4
+    assert 'record["hash"] = sha256_file(record["image_path"])' in stage5
+
+
 def test_bulk_rebuild_has_google_drive_resume_checkpoints_and_final_zip_copy():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "from google.colab import drive" in workflow
