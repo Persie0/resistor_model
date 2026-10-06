@@ -16,7 +16,6 @@ to Google Drive as well as offered as a browser download.
 from __future__ import annotations
 
 import csv
-import gc
 import hashlib
 import json
 import random
@@ -439,8 +438,9 @@ for record_index, record in enumerate(records, 1):
         continue
 
     image = Image.open(record["image_path"]).convert("RGB")
-    state = processor.set_image(image)
-    output = processor.set_text_prompt(prompt=BODY_TEXT_PROMPT, state=state)
+    with torch.inference_mode():
+        state = processor.set_image(image)
+        output = processor.set_text_prompt(prompt=BODY_TEXT_PROMPT, state=state)
 
     masks_tensor = output["masks"]
     if masks_tensor.ndim == 4 and masks_tensor.shape[1] == 1:
@@ -466,7 +466,6 @@ for record_index, record in enumerate(records, 1):
                 "mask_filename": mask_filename,
                 "score": best_score,
                 "text_detection_index": best_candidate_index,
-                "hash": sha256_file(record["image_path"]),
                 "reason": "sam_top_result",
             }
             accepted_records.append(accepted)
@@ -506,10 +505,6 @@ for record_index, record in enumerate(records, 1):
             f"rejected {rejected_count} | {rate:.2f} new img/s | ETA {eta / 60:.1f} min"
         )
 
-    if processed_this_run % 50 == 0:
-        gc.collect()
-        torch.cuda.empty_cache()
-
 save_checkpoint(processed_keys, accepted_records, pending_mask_names)
 progress.close()
 log(
@@ -521,6 +516,8 @@ log(
 stage(5, 8, "Deduplicate accepted images and split 80/10/10")
 by_hash = defaultdict(list)
 for record in accepted_records:
+    if "hash" not in record:
+        record["hash"] = sha256_file(record["image_path"])
     by_hash[record["hash"]].append(record)
 
 unique = [max(group, key=lambda item: item["score"]) for group in by_hash.values()]
