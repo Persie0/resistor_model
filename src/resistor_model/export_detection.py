@@ -36,7 +36,7 @@ def metadata_for_checkpoint(payload: dict) -> dict:
             "dtype": "float32",
             "format": "RGB",
             "normalization": "uint8 / 255.0; torchvision detector normalization is inside the model",
-            "resize": "letterbox or resize to 320x320 before inference; map output boxes back to source image",
+            "resize": "resize/stretch source RGB to exactly 320x320; map x/y box coordinates back with independent source_width/320 and source_height/320 scales",
         },
         "outputs": {
             "boxes": {
