@@ -18,6 +18,7 @@ The default detector is torchvision `ssdlite320_mobilenet_v3_large`:
 
 - input: RGB float tensor in `[0, 1]`
 - detector input size: 320×320
+- preprocessing geometry: resize/stretch the source image directly to 320×320 (no letterbox), then map predicted X/Y coordinates back with independent width/height scales
 - classes: background + resistor
 - training target: COCO bounding boxes
 - validation selection: COCO bbox mAP over IoU 0.50:0.95
