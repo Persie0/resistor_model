@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 
@@ -73,19 +74,22 @@ def export_onnx(
     model, payload = load_checkpoint_model(checkpoint_path)
     wrapper = DetectionExportWrapper(model).eval()
     example = torch.zeros(1, 3, 320, 320, dtype=torch.float32)
-    torch.onnx.export(
-        wrapper,
-        example,
-        output,
-        input_names=["image"],
-        output_names=["boxes", "scores", "labels"],
-        dynamic_axes={
+    export_kwargs = {
+        "input_names": ["image"],
+        "output_names": ["boxes", "scores", "labels"],
+        "dynamic_axes": {
             "boxes": {0: "detections"},
             "scores": {0: "detections"},
             "labels": {0: "detections"},
         },
-        opset_version=opset,
-    )
+        "opset_version": opset,
+    }
+    # PyTorch 2.9+ defaults to the torch.export/Dynamo ONNX path. Torchvision
+    # SSD post-NMS contains data-dependent control flow that this path cannot
+    # currently guard. The legacy TorchScript exporter handles torchvision NMS.
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        export_kwargs["dynamo"] = False
+    torch.onnx.export(wrapper, example, output, **export_kwargs)
     metadata_path = output.with_suffix(output.suffix + ".json")
     metadata_path.write_text(
         json.dumps(metadata_for_checkpoint(payload), indent=2),
