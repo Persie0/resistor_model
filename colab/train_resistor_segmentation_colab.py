@@ -13,13 +13,16 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import json
+import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
-SEGMENTATION_COLAB_VERSION = "2026-10-09-v5-diagnostic-startup"
+SEGMENTATION_COLAB_VERSION = "2026-10-09-v6-streamed-stdout"
 MODEL_NAME = "lraspp_mobilenet_v3_large"
 DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/v4/resistor_sam3_merged.zip"
 DATASET_SHA256 = "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
@@ -55,24 +58,72 @@ def run_with_heartbeat(
     cwd: Path | None = None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
 ) -> None:
-    """Run a subprocess while guaranteeing visible Colab output during silent startup."""
+    """Forward child stdout/stderr through Colab's Python output capture.
+
+    A subprocess inheriting the kernel's native file descriptors can train and
+    save checkpoints while *none* of its prints reach the notebook cell.
+    Capture both streams and explicitly print from the parent Python process.
+    The reader thread prevents blocking on readline while retaining heartbeats.
+    """
     print("+", " ".join(map(str, command)), flush=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    assert process.stdout is not None
+
+    events: queue.Queue[str | None] = queue.Queue()
+
+    def pump_output() -> None:
+        try:
+            for line in process.stdout:
+                events.put(line)
+        finally:
+            events.put(None)
+
+    reader = threading.Thread(
+        target=pump_output,
+        name="segmentation-trainer-log-forwarder",
+        daemon=True,
+    )
+    reader.start()
     started = time.monotonic()
-    process = subprocess.Popen(command, cwd=str(cwd) if cwd else None)
-    next_heartbeat = started + max(1.0, heartbeat_seconds)
-    while True:
-        return_code = process.poll()
-        if return_code is not None:
-            if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, command)
-            return
-        now = time.monotonic()
-        if now >= next_heartbeat:
-            print(
-                f"[trainer] process pid={process.pid} alive | elapsed {now - started:.0f}s",
-                flush=True,
-            )
-            if int(now - started) % 30 < heartbeat_seconds:
+    heartbeat = max(0.1, float(heartbeat_seconds))
+    next_heartbeat = started + heartbeat
+    next_health = started + 30.0
+
+    try:
+        while True:
+            now = time.monotonic()
+            try:
+                item = events.get(timeout=max(0.01, min(0.25, next_heartbeat - now)))
+            except queue.Empty:
+                item = ""
+
+            if item is None:
+                break
+            if item:
+                print(item, end="" if item.endswith("\n") else "\n", flush=True)
+                next_heartbeat = time.monotonic() + heartbeat
+
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                print(
+                    f"[trainer] process pid={process.pid} alive | "
+                    f"no child output for {heartbeat:.0f}s | "
+                    f"elapsed {now - started:.0f}s",
+                    flush=True,
+                )
+                next_heartbeat = now + heartbeat
+            if now >= next_health:
                 try:
                     status = Path(f"/proc/{process.pid}/status").read_text(encoding="utf-8")
                     selected = [
@@ -83,8 +134,21 @@ def run_with_heartbeat(
                     print(f"[trainer] process health: {' | '.join(selected)}", flush=True)
                 except OSError:
                     pass
-            next_heartbeat = now + max(1.0, heartbeat_seconds)
-        time.sleep(0.5)
+                next_health = now + 30.0
+
+        return_code = process.wait()
+        if return_code:
+            raise subprocess.CalledProcessError(return_code, command)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        process.stdout.close()
+        reader.join(timeout=1)
 
 
 def require_gpu() -> None:

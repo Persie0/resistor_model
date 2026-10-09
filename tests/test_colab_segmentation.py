@@ -20,7 +20,7 @@ def test_colab_recipe_uses_v4_sam_segmentation_release_asset():
         "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
     )
     assert colab.MODEL_NAME == "lraspp_mobilenet_v3_large"
-    assert "v5-diagnostic-startup" in colab.SEGMENTATION_COLAB_VERSION
+    assert "v6-streamed-stdout" in colab.SEGMENTATION_COLAB_VERSION
 
 
 def test_colab_training_command_uses_mobile_and_licensing_clean_defaults(tmp_path: Path):
@@ -124,3 +124,58 @@ def test_v4_colab_early_startup_diagnostics_are_enabled():
     assert '[startup] indexing training images' in source
     assert '[startup] constructing LR-ASPP model' in source
     assert '[train] awaiting first DataLoader batch' in source
+
+
+
+def test_heartbeat_launcher_forwards_child_stdout_and_stderr(capsys, tmp_path):
+    import sys
+
+    colab = _load()
+    colab.run_with_heartbeat(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import sys; print('[boot] visible from stdout', flush=True); "
+            "print('[startup] visible from stderr', file=sys.stderr, flush=True)",
+        ],
+        cwd=tmp_path,
+        heartbeat_seconds=0.1,
+    )
+    visible = capsys.readouterr().out
+    assert "[boot] visible from stdout" in visible
+    assert "[startup] visible from stderr" in visible
+
+
+def test_heartbeat_launcher_keeps_progress_visible_while_child_is_silent(capsys, tmp_path):
+    import sys
+
+    colab = _load()
+    colab.run_with_heartbeat(
+        [sys.executable, "-u", "-c",
+         "import time; print('starting', flush=True); time.sleep(0.35); "
+         "print('finished', flush=True)"],
+        cwd=tmp_path,
+        heartbeat_seconds=0.1,
+    )
+    visible = capsys.readouterr().out
+    assert "starting" in visible and "finished" in visible
+    assert "[trainer] process pid=" in visible
+
+
+def test_heartbeat_launcher_raises_on_child_failure_and_shows_traceback(capsys, tmp_path):
+    import subprocess
+    import sys
+    import pytest
+
+    colab = _load()
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        colab.run_with_heartbeat(
+            [sys.executable, "-u", "-c",
+             "import sys; print('simulated segmentation error', "
+             "file=sys.stderr, flush=True); sys.exit(7)"],
+            cwd=tmp_path,
+            heartbeat_seconds=0.1,
+        )
+    assert raised.value.returncode == 7
+    assert "simulated segmentation error" in capsys.readouterr().out
