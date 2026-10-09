@@ -54,6 +54,10 @@ The ONNX file is:
 
 `resistor_detector_ssdlite320.onnx`
 
+### Test on personal photos after training
+
+The detector training notebook now has a separate final cell that runs after training and can be rerun independently. It uses the saved `best.pt` to regenerate ONNX when necessary, lets you upload multiple JPG/PNG photos, and visualizes the model's scored resistor boxes in original image coordinates without retraining. The helper is `colab/test_resistor_detector_colab.py`. Its initial score threshold of `0.35` is configurable; no box above the threshold is reported explicitly.
+
 ### Large COCO startup and progress
 
 The v4 SAM 3.1 COCO JSON includes mask RLEs that are **not used** by the box
