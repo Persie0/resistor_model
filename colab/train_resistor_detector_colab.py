@@ -19,7 +19,7 @@ import sys
 import time
 import urllib.request
 
-DETECTION_COLAB_VERSION = "2026-10-09-v1"
+DETECTION_COLAB_VERSION = "2026-10-09-v2-streaming-startup"
 MODEL_NAME = "ssdlite320_mobilenet_v3_large"
 DATASET_URL = (
     "https://github.com/Persie0/resistor_model/releases/download/v4/"
@@ -29,7 +29,7 @@ DATASET_SHA256 = "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c
 IMAGE_SIZE = 320
 EPOCHS = 80
 BATCH_SIZE = 16
-PROGRESS_EVERY = 10
+PROGRESS_EVERY = 1
 CHECKPOINT_EVERY = 5
 HEARTBEAT_SECONDS = 5
 USE_PRETRAINED_BACKBONE = False
