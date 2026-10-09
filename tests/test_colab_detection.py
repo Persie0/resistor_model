@@ -39,3 +39,9 @@ def test_detector_colab_outputs_distinct_detector_artifacts():
     colab = _load()
     assert colab.ONNX_PATH.name == "resistor_detector_ssdlite320.onnx"
     assert "detector-v4" in str(colab.RUN_DIR)
+
+
+def test_detector_colab_prints_immediate_training_progress():
+    colab = _load()
+    assert colab.PROGRESS_EVERY == 1
+    assert "streaming-startup" in colab.DETECTION_COLAB_VERSION
