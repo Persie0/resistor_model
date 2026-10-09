@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+# Install diagnostics before importing PyTorch: CUDA/torchvision imports can be
+# expensive on some Colab runtimes, long before the first trainer setup log.
+# Keep this conditional so importing the module from pytest has no side effects.
+if __name__ == "__main__":
+    import faulthandler as _startup_faulthandler
+    import sys as _startup_sys
+
+    _startup_faulthandler.enable()
+    _startup_faulthandler.dump_traceback_later(
+        60, repeat=True, file=_startup_sys.stderr
+    )
+    print("[boot] trainer started; importing NumPy and PyTorch...", flush=True)
+
 import argparse
 import json
 from pathlib import Path
@@ -15,6 +28,9 @@ from resistor_model.segmentation import (
     build_lraspp_model,
     segmentation_loss,
 )
+
+if __name__ == "__main__":
+    print("[boot] NumPy, PyTorch and segmentation imports complete", flush=True)
 
 
 def foreground_metrics(logits: torch.Tensor, target: torch.Tensor) -> dict[str, int]:
@@ -168,12 +184,17 @@ def _save_checkpoint(
 
 
 def train(args: argparse.Namespace) -> dict[str, object]:
+    print("[startup] setting random seeds", flush=True)
     _seed_everything(args.seed)
+    print("[startup] checking CUDA availability", flush=True)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    print(f"[startup] device={device}", flush=True)
     output_dir = Path(args.output_dir)
+    print(f"[startup] preparing output directory: {output_dir}", flush=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir = output_dir / "checkpoints"
 
+    print("[startup] indexing training images and SAM masks...", flush=True)
     train_dataset = CocoResistorSegmentationDataset(
         args.dataset_root,
         "train",
@@ -181,6 +202,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         augment=True,
         category_names=args.category,
     )
+    print(f"[startup] training dataset ready ({len(train_dataset)} images)", flush=True)
+    print("[startup] indexing validation images and SAM masks...", flush=True)
     val_dataset = CocoResistorSegmentationDataset(
         args.dataset_root,
         "valid",
@@ -188,6 +211,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         augment=False,
         category_names=args.category,
     )
+    print(f"[startup] validation dataset ready ({len(val_dataset)} images)", flush=True)
+    print("[startup] creating DataLoaders", flush=True)
     train_loader = _make_loader(
         train_dataset,
         batch_size=args.batch_size,
@@ -203,10 +228,15 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         device=device,
     )
 
+    print("[startup] constructing LR-ASPP model on CPU", flush=True)
     model = build_lraspp_model(
         num_classes=2,
         pretrained_backbone=args.pretrained_backbone,
-    ).to(device)
+    )
+    print("[startup] model constructed; transferring weights to device", flush=True)
+    model = model.to(device)
+    print(f"[startup] model ready on {device}", flush=True)
+    print("[startup] initializing optimizer/scheduler/scaler", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
     scaler_enabled = args.amp and device.type == "cuda"
@@ -218,7 +248,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     best_dice = -1.0
 
     if args.resume:
+        print(f"[startup] reading resume checkpoint: {args.resume}", flush=True)
         checkpoint = torch.load(args.resume, map_location="cpu")
+        print("[startup] resume checkpoint loaded; restoring optimizer", flush=True)
         model.load_state_dict(checkpoint["model"])
         if "optimizer" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
@@ -246,6 +278,13 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         flush=True,
     )
 
+    if start_epoch >= args.epochs:
+        print(
+            f"[resume] checkpoint already completed {start_epoch} epochs, "
+            f"but --epochs={args.epochs}; no new epochs will run. "
+            "Increase --epochs to train further.",
+            flush=True,
+        )
     metrics_path = output_dir / "metrics.jsonl"
     for epoch in range(start_epoch, args.epochs):
         completed_epoch = epoch + 1
@@ -255,9 +294,18 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         running_loss = 0.0
         batches = 0
         total_batches = len(train_loader)
+        print("[train] awaiting first DataLoader batch...", flush=True)
         for batch_index, (images, masks) in enumerate(train_loader, start=1):
+            if batch_index == 1:
+                print(
+                    f"[train] first batch loaded; image shape={tuple(images.shape)} | "
+                    "transferring tensors to device",
+                    flush=True,
+                )
             images = images.to(device, non_blocking=True)
             masks = masks.to(device, non_blocking=True)
+            if batch_index == 1:
+                print("[train] running first forward/backward pass...", flush=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=args.amp and device.type == "cuda"):
                 logits = model(images)["out"]
@@ -457,4 +505,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        _startup_faulthandler.cancel_dump_traceback_later()

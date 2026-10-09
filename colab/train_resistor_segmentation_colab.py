@@ -12,13 +12,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 
-SEGMENTATION_COLAB_VERSION = "2026-10-09-v4-sam-masks"
+SEGMENTATION_COLAB_VERSION = "2026-10-09-v5-diagnostic-startup"
 MODEL_NAME = "lraspp_mobilenet_v3_large"
 DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/v4/resistor_sam3_merged.zip"
 DATASET_SHA256 = "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
@@ -68,9 +69,20 @@ def run_with_heartbeat(
         now = time.monotonic()
         if now >= next_heartbeat:
             print(
-                f"[trainer] process alive | waiting for next trainer log line | elapsed {now - started:.0f}s",
+                f"[trainer] process pid={process.pid} alive | elapsed {now - started:.0f}s",
                 flush=True,
             )
+            if int(now - started) % 30 < heartbeat_seconds:
+                try:
+                    status = Path(f"/proc/{process.pid}/status").read_text(encoding="utf-8")
+                    selected = [
+                        line.strip()
+                        for line in status.splitlines()
+                        if line.startswith(("State:", "VmRSS:", "Threads:"))
+                    ]
+                    print(f"[trainer] process health: {' | '.join(selected)}", flush=True)
+                except OSError:
+                    pass
             next_heartbeat = now + max(1.0, heartbeat_seconds)
         time.sleep(0.5)
 
@@ -117,42 +129,98 @@ def install_dependencies() -> None:
     run([sys.executable, "-m", "pip", "install", "-q", "-e", f"{REPO}[segmentation,export]"])
 
 
+def archive_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def extracted_dataset_ready(root: Path) -> bool:
+    """Require the v4 merge manifest and all expected image/mask pairs.
+
+    This avoids treating a partially extracted ZIP as a reusable dataset.
+    """
+    try:
+        dataset_root = find_dataset_root(root)
+        summary_path = dataset_root / "summary.json"
+        if not summary_path.is_file():
+            return False
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        for split in ("train", "valid", "test"):
+            expected = int(summary["splits"][split]["images"])
+            split_root = dataset_root / split
+            images = split_root / "images"
+            masks = split_root / "masks_semantic"
+            if (
+                expected <= 0
+                or not images.is_dir()
+                or not masks.is_dir()
+                or sum(p.is_file() for p in images.iterdir()) != expected
+                or sum(p.is_file() for p in masks.glob("*.png")) != expected
+            ):
+                return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return False
+
+
 def download_dataset() -> None:
+    WORK.mkdir(parents=True, exist_ok=True)
+    # A Colab retry in the same runtime should NOT download 572 MiB again.
+    archive_verified = False
+    if ARCHIVE.is_file():
+        print("[dataset] checking existing local v4 archive...", flush=True)
+        archive_verified = archive_sha256(ARCHIVE) == DATASET_SHA256
+        if archive_verified:
+            print("[dataset] verified archive cached locally", flush=True)
+        else:
+            print("[dataset] stale/incomplete archive; downloading again", flush=True)
+            ARCHIVE.unlink()
+
+    if not archive_verified:
+        request = urllib.request.Request(DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
+        hasher = hashlib.sha256()
+        total_downloaded = 0
+        print("[dataset] downloading v4 SAM-mask dataset...", flush=True)
+        with urllib.request.urlopen(request) as response, ARCHIVE.open("wb") as destination:
+            total = int(response.headers.get("Content-Length") or 0)
+            last_report = 0
+            while True:
+                chunk = response.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                destination.write(chunk)
+                hasher.update(chunk)
+                total_downloaded += len(chunk)
+                if total_downloaded - last_report >= 32 * 1024 * 1024 or (total and total_downloaded >= total):
+                    progress = f" ({100 * total_downloaded / total:.0f}%)" if total else ""
+                    print(
+                        f"[dataset] downloaded {total_downloaded / 1024 / 1024:.1f} MiB{progress}",
+                        flush=True,
+                    )
+                    last_report = total_downloaded
+        actual_sha = hasher.hexdigest()
+        if actual_sha != DATASET_SHA256:
+            ARCHIVE.unlink(missing_ok=True)
+            raise RuntimeError(f"v4 archive checksum mismatch: expected {DATASET_SHA256}, got {actual_sha}")
+        print(
+            f"[dataset] checksum OK | {ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB",
+            flush=True,
+        )
+
+    if extracted_dataset_ready(DATASET_ROOT):
+        print("[dataset] complete v4 extraction cached; skipping extraction", flush=True)
+        return
     if DATASET_ROOT.exists():
         shutil.rmtree(DATASET_ROOT)
     DATASET_ROOT.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
-    hasher = hashlib.sha256()
-    total_downloaded = 0
-    print("[dataset] downloading v4 SAM-mask dataset...", flush=True)
-    with urllib.request.urlopen(request) as response, ARCHIVE.open("wb") as destination:
-        total = int(response.headers.get("Content-Length") or 0)
-        last_report = 0
-        while True:
-            chunk = response.read(8 * 1024 * 1024)
-            if not chunk:
-                break
-            destination.write(chunk)
-            hasher.update(chunk)
-            total_downloaded += len(chunk)
-            if total_downloaded - last_report >= 32 * 1024 * 1024 or (total and total_downloaded >= total):
-                progress = f" ({100 * total_downloaded / total:.0f}%)" if total else ""
-                print(
-                    f"[dataset] downloaded {total_downloaded / 1024 / 1024:.1f} MiB{progress}",
-                    flush=True,
-                )
-                last_report = total_downloaded
-    actual_sha = hasher.hexdigest()
-    if actual_sha != DATASET_SHA256:
-        ARCHIVE.unlink(missing_ok=True)
-        raise RuntimeError(f"v4 archive checksum mismatch: expected {DATASET_SHA256}, got {actual_sha}")
-    print(
-        f"[dataset] checksum OK | {ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB",
-        flush=True,
-    )
     print("[dataset] extracting v4 SAM masks...", flush=True)
     shutil.unpack_archive(ARCHIVE, DATASET_ROOT)
-    print("[dataset] extraction complete.", flush=True)
+    if not extracted_dataset_ready(DATASET_ROOT):
+        raise RuntimeError("Extracted v4 dataset failed manifest/image/mask completeness check")
+    print("[dataset] extraction complete and verified.", flush=True)
 
 
 def find_dataset_root(root: Path) -> Path:
