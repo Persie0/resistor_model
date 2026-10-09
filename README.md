@@ -196,6 +196,14 @@ resistor-export \
 
 The exporter also writes an adjacent JSON metadata file with the model configuration and output names.
 
+## Train the v4 resistor box detector
+
+The public release asset `v4/resistor_sam3_merged.zip` is the detector dataset. It contains COCO `train/valid/test` splits with a single `resistor` category; each accepted SAM 3.1 body mask also has a COCO bounding box.
+
+Use `colab/train_resistor_detector_colab.ipynb` for the one-click GPU workflow. It trains torchvision **SSDLite320 + MobileNetV3-Large** as a one-class box detector, evaluates COCO bbox mAP, saves resumable Drive checkpoints, and exports `resistor_detector_ssdlite320.onnx`. The default recipe does not use Ultralytics or download pretrained ImageNet/COCO weights.
+
+See `docs/resistor_detection.md` for local training/export commands and model I/O.
+
 ## Test whole-resistor segmentation and alignment in Colab
 
 Use `colab/test_resistor_segmentation_alignment_colab.ipynb` after exporting `resistor_segmenter_lraspp.onnx` to the default Drive path. The notebook uploads a photo, runs the whole-resistor segmenter, and estimates the resistor long axis from a weighted consensus of robust `fitLine`, PCA, `minAreaRect`, and the longest convex-hull chord. Angle outliers are rejected before rotation.
