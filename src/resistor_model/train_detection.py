@@ -56,10 +56,30 @@ def _make_loader(
     num_workers: int,
     device: torch.device,
 ):
+    if batch_size <= 0:
+        raise ValueError("Detection batch size must be positive")
+    if shuffle and len(dataset) < 2:
+        raise ValueError("SSDLite training requires at least two images for BatchNorm")
+
+    effective_batch_size = min(batch_size, len(dataset)) if shuffle else batch_size
+    # SSDLite has BatchNorm on a 1x1 feature map, so its training batches
+    # cannot contain only one sample. Drop just a singleton final batch.
+    drop_last = bool(
+        shuffle
+        and len(dataset) > effective_batch_size
+        and len(dataset) % effective_batch_size == 1
+    )
+    if drop_last:
+        print(
+            f"[loader] excluding singleton tail batch "
+            f"({len(dataset)} samples, batch size {effective_batch_size})",
+            flush=True,
+        )
     return DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=effective_batch_size,
         shuffle=shuffle,
+        drop_last=drop_last,
         num_workers=num_workers,
         collate_fn=collate_detection_batch,
         pin_memory=device.type == "cuda",
