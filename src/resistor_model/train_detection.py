@@ -182,8 +182,34 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir = output_dir / "checkpoints"
 
-    train_dataset = CocoResistorDetectionDataset(args.dataset_root, "train", augment=True)
-    val_dataset = CocoResistorDetectionDataset(args.dataset_root, "valid", augment=False)
+    print(f"[startup] device={device} | output={output_dir}", flush=True)
+    train_annotation = Path(args.dataset_root) / "train" / "_annotations.coco.json"
+    val_annotation = Path(args.dataset_root) / "valid" / "_annotations.coco.json"
+    print(
+        f"[startup] loading train COCO bbox metadata | "
+        f"{train_annotation.stat().st_size / 1024 / 1024:.1f} MiB",
+        flush=True,
+    )
+    train_dataset = CocoResistorDetectionDataset(
+        args.dataset_root,
+        "train",
+        augment=True,
+        progress=True,
+    )
+    print(f"[startup] train dataset ready | {len(train_dataset)} images", flush=True)
+    print(
+        f"[startup] loading validation COCO bbox metadata | "
+        f"{val_annotation.stat().st_size / 1024 / 1024:.1f} MiB",
+        flush=True,
+    )
+    val_dataset = CocoResistorDetectionDataset(
+        args.dataset_root,
+        "valid",
+        augment=False,
+        progress=True,
+    )
+    print(f"[startup] validation dataset ready | {len(val_dataset)} images", flush=True)
+    print("[startup] creating DataLoaders", flush=True)
     train_loader = _make_loader(
         train_dataset,
         batch_size=args.batch_size,
@@ -199,10 +225,15 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         device=device,
     )
 
+    print("[startup] building SSDLite320 model on CPU", flush=True)
     model = build_ssdlite_model(
         num_classes=2,
         pretrained_backbone=args.pretrained_backbone,
-    ).to(device)
+    )
+    print("[startup] model built; moving model to device", flush=True)
+    model = model.to(device)
+    print(f"[startup] model ready on {device}", flush=True)
+    print("[startup] creating optimizer/scheduler/AMP scaler", flush=True)
     optimizer = torch.optim.SGD(
         model.parameters(),
         lr=args.lr,
@@ -223,7 +254,14 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     start_epoch = 0
     best_map = -1.0
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu")
+        resume_path = Path(args.resume)
+        print(
+            f"[startup] loading resume checkpoint {resume_path} "
+            f"({resume_path.stat().st_size / 1024 / 1024:.1f} MiB)",
+            flush=True,
+        )
+        checkpoint = torch.load(resume_path, map_location="cpu")
+        print("[startup] resume checkpoint deserialized; restoring state", flush=True)
         if checkpoint.get("architecture") != "ssdlite320_mobilenet_v3_large":
             raise ValueError(
                 f"Unsupported resume architecture: {checkpoint.get('architecture')!r}"
@@ -237,6 +275,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = int(checkpoint.get("epoch", -1)) + 1
         best_map = float(checkpoint.get("best_map", -1.0))
+        print("[startup] resume state restored", flush=True)
         print(
             f"[resume] {args.resume} | completed epoch {start_epoch}/{args.epochs} | "
             f"best mAP {best_map:.4f}",
