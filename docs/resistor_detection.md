@@ -54,6 +54,19 @@ The ONNX file is:
 
 `resistor_detector_ssdlite320.onnx`
 
+### Large COCO startup and progress
+
+The v4 SAM 3.1 COCO JSON includes mask RLEs that are **not used** by the box
+detector. The detection loader uses streaming `ijson` to extract only the
+`images`, `categories` and `annotations[].bbox` fields, rather than
+materializing the full segmentation data. Colab prints `[startup]` and
+`[coco]` stage logs (including byte progress while reading large JSON files),
+and prints training progress every batch.
+
+SSDLite's BatchNorm requires at least two images per training batch. A
+singleton tail batch is omitted, and fewer than two training images produce a
+clear error. Validation retains all images.
+
 ## Local training
 
 Install detection dependencies:

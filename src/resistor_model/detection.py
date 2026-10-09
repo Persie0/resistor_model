@@ -16,6 +16,177 @@ from torchvision.transforms import functional as TF
 from PIL import Image
 
 
+_SCALAR_EVENTS = {"string", "number", "boolean", "null"}
+
+
+def _compact_coco_payload(coco: dict) -> tuple[dict[int, str], list[dict], list[dict]]:
+    """Discard segmentation/RLE payloads and keep only fields needed for bbox detection."""
+    categories = {
+        int(item["id"]): str(item.get("name", "")).strip().lower()
+        for item in coco.get("categories", [])
+    }
+    images = [
+        {
+            "id": int(item["id"]),
+            "file_name": str(item["file_name"]),
+            "width": int(item.get("width", 0) or 0),
+            "height": int(item.get("height", 0) or 0),
+        }
+        for item in coco.get("images", [])
+    ]
+    annotations = []
+    for item in coco.get("annotations", []):
+        bbox = item.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        annotations.append(
+            {
+                "image_id": int(item["image_id"]),
+                "category_id": int(item["category_id"]),
+                "bbox": [float(value) for value in bbox],
+                "iscrowd": int(item.get("iscrowd", 0)),
+            }
+        )
+    return categories, images, annotations
+
+
+def load_coco_bbox_metadata(
+    path: str | Path,
+    *,
+    progress_label: str | None = None,
+) -> tuple[dict[int, str], list[dict], list[dict]]:
+    """Load COCO metadata without retaining masks/segmentations.
+
+    With the detection optional dependency installed this streams the JSON via ijson,
+    which avoids materializing the large SAM RLE segmentation payloads. A small-file
+    stdlib fallback remains available for minimal/dev installations.
+    """
+    annotation_path = Path(path)
+    size = annotation_path.stat().st_size
+
+    try:
+        import ijson
+    except ImportError:
+        if progress_label:
+            print(
+                f"[coco] {progress_label}: ijson unavailable; using stdlib JSON "
+                f"for {size / 1024 / 1024:.1f} MiB",
+                flush=True,
+            )
+        coco = json.loads(annotation_path.read_text(encoding="utf-8"))
+        result = _compact_coco_payload(coco)
+        if progress_label:
+            print(
+                f"[coco] {progress_label}: ready | images={len(result[1])} | "
+                f"boxes={len(result[2])}",
+                flush=True,
+            )
+        return result
+
+    categories: dict[int, str] = {}
+    images: list[dict] = []
+    annotations: list[dict] = []
+
+    current_image: dict | None = None
+    current_category: dict | None = None
+    current_annotation: dict | None = None
+    current_bbox: list[float] | None = None
+
+    report_step = max(8 * 1024 * 1024, size // 20 if size else 8 * 1024 * 1024)
+    next_report = report_step
+    event_count = 0
+
+    if progress_label:
+        print(
+            f"[coco] {progress_label}: streaming bbox metadata from "
+            f"{annotation_path} ({size / 1024 / 1024:.1f} MiB)",
+            flush=True,
+        )
+
+    with annotation_path.open("rb") as handle:
+        for prefix, event, value in ijson.parse(handle):
+            event_count += 1
+
+            if prefix == "images.item" and event == "start_map":
+                current_image = {}
+            elif prefix == "images.item" and event == "end_map":
+                if current_image is not None and "id" in current_image and "file_name" in current_image:
+                    images.append(current_image)
+                current_image = None
+            elif current_image is not None and event in _SCALAR_EVENTS:
+                if prefix == "images.item.id":
+                    current_image["id"] = int(value)
+                elif prefix == "images.item.file_name":
+                    current_image["file_name"] = str(value)
+                elif prefix == "images.item.width":
+                    current_image["width"] = int(value or 0)
+                elif prefix == "images.item.height":
+                    current_image["height"] = int(value or 0)
+
+            if prefix == "categories.item" and event == "start_map":
+                current_category = {}
+            elif prefix == "categories.item" and event == "end_map":
+                if current_category is not None and "id" in current_category:
+                    categories[int(current_category["id"])] = str(
+                        current_category.get("name", "")
+                    ).strip().lower()
+                current_category = None
+            elif current_category is not None and event in _SCALAR_EVENTS:
+                if prefix == "categories.item.id":
+                    current_category["id"] = int(value)
+                elif prefix == "categories.item.name":
+                    current_category["name"] = str(value)
+
+            if prefix == "annotations.item" and event == "start_map":
+                current_annotation = {}
+            elif prefix == "annotations.item" and event == "end_map":
+                if (
+                    current_annotation is not None
+                    and "image_id" in current_annotation
+                    and "category_id" in current_annotation
+                    and isinstance(current_annotation.get("bbox"), list)
+                    and len(current_annotation["bbox"]) == 4
+                ):
+                    annotations.append(current_annotation)
+                current_annotation = None
+                current_bbox = None
+            elif current_annotation is not None:
+                if prefix == "annotations.item.image_id" and event in _SCALAR_EVENTS:
+                    current_annotation["image_id"] = int(value)
+                elif prefix == "annotations.item.category_id" and event in _SCALAR_EVENTS:
+                    current_annotation["category_id"] = int(value)
+                elif prefix == "annotations.item.iscrowd" and event in _SCALAR_EVENTS:
+                    current_annotation["iscrowd"] = int(value or 0)
+                elif prefix == "annotations.item.bbox" and event == "start_array":
+                    current_bbox = []
+                elif prefix == "annotations.item.bbox.item" and event == "number":
+                    if current_bbox is not None:
+                        current_bbox.append(float(value))
+                elif prefix == "annotations.item.bbox" and event == "end_array":
+                    if current_bbox is not None:
+                        current_annotation["bbox"] = current_bbox
+                    current_bbox = None
+
+            if progress_label and event_count % 4096 == 0:
+                position = handle.tell()
+                if position >= next_report:
+                    print(
+                        f"[coco] {progress_label}: "
+                        f"{position / 1024 / 1024:.1f}/{size / 1024 / 1024:.1f} MiB "
+                        f"({100.0 * position / max(1, size):.0f}%)",
+                        flush=True,
+                    )
+                    next_report = position + report_step
+
+    if progress_label:
+        print(
+            f"[coco] {progress_label}: ready | images={len(images)} | "
+            f"boxes={len(annotations)}",
+            flush=True,
+        )
+    return categories, images, annotations
+
+
 class CocoResistorDetectionDataset(Dataset):
     """COCO bbox dataset mapped to one foreground class: resistor=1, background=0."""
 
@@ -26,6 +197,7 @@ class CocoResistorDetectionDataset(Dataset):
         *,
         augment: bool = False,
         category_names: Sequence[str] = ("resistor",),
+        progress: bool = False,
     ) -> None:
         self.root = Path(root)
         self.split = str(split)
@@ -34,11 +206,10 @@ class CocoResistorDetectionDataset(Dataset):
         if not self.annotation_path.is_file():
             raise FileNotFoundError(f"COCO annotation file not found: {self.annotation_path}")
 
-        coco = json.loads(self.annotation_path.read_text(encoding="utf-8"))
-        categories = {
-            int(item["id"]): str(item.get("name", "")).strip().lower()
-            for item in coco.get("categories", [])
-        }
+        categories, images, annotations = load_coco_bbox_metadata(
+            self.annotation_path,
+            progress_label=self.split if progress else None,
+        )
         wanted = {str(name).strip().lower() for name in category_names}
         self.category_ids = {category_id for category_id, name in categories.items() if name in wanted}
         if not self.category_ids:
@@ -47,11 +218,16 @@ class CocoResistorDetectionDataset(Dataset):
                 f"{self.annotation_path}; found {sorted(set(categories.values()))}"
             )
 
-        self.images = sorted(coco.get("images", []), key=lambda item: int(item["id"]))
+        self.images = sorted(images, key=lambda item: int(item["id"]))
         self.annotations_by_image: dict[int, list[dict]] = defaultdict(list)
-        for annotation in coco.get("annotations", []):
+        for annotation in annotations:
             if int(annotation.get("category_id", -1)) in self.category_ids:
-                self.annotations_by_image[int(annotation["image_id"])].append(annotation)
+                self.annotations_by_image[int(annotation["image_id"])].append(
+                    {
+                        "bbox": annotation["bbox"],
+                        "iscrowd": int(annotation.get("iscrowd", 0)),
+                    }
+                )
 
         if not self.images:
             raise ValueError(f"No images found in {self.annotation_path}")

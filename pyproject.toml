@@ -24,6 +24,7 @@ detection = [
   "Pillow>=10",
   "torchmetrics>=1.4",
   "pycocotools>=2.0.7",
+  "ijson>=3.3",
 ]
 
 [project.scripts]
