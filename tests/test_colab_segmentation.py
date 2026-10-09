@@ -20,7 +20,7 @@ def test_colab_recipe_uses_v4_sam_segmentation_release_asset():
         "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
     )
     assert colab.MODEL_NAME == "lraspp_mobilenet_v3_large"
-    assert "v5-diagnostic-startup" in colab.SEGMENTATION_COLAB_VERSION
+    assert "v6-streamed-stdout" in colab.SEGMENTATION_COLAB_VERSION
 
 
 def test_colab_training_command_uses_mobile_and_licensing_clean_defaults(tmp_path: Path):
