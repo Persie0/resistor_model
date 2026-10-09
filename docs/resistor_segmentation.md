@@ -27,10 +27,10 @@ Open `colab/train_resistor_segmentation_colab.ipynb`, choose a GPU runtime and r
 The recipe automatically downloads:
 
 ```text
-https://github.com/Persie0/resistor_model/releases/download/m2/detection_res.v1i.coco-segmentation.zip
+https://github.com/Persie0/resistor_model/releases/download/v4/resistor_sam3_merged.zip
 ```
 
-The source dataset contains the category names `resistor` and `res`; the Colab recipe explicitly collapses both into the same foreground class.
+The v4 dataset contains one `resistor` foreground class and the original SAM 3.1 semantic PNG masks under `train/valid/test/masks_semantic/`. Training reads those binary masks directly, preserving the detailed silhouette without COCO RLE parsing or bounding-box fallback. The archive is verified against its release SHA-256 (`be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f`). Legacy COCO polygon datasets remain supported by the loader.
 
 Defaults:
 
@@ -40,7 +40,7 @@ Defaults:
 - optimizer: AdamW
 - loss: foreground-weighted cross entropy + soft Dice
 - augmentation: flips, 90-degree rotations and conservative color jitter
-- live train and validation progress every `10` batches
+- live train and validation progress every `1` batch in Colab (plus startup heartbeats)
 - validation metrics: foreground IoU, Dice and pixel accuracy
 - checkpoint selection: best validation Dice
 - `last.pt` after every completed epoch
@@ -48,7 +48,7 @@ Defaults:
 - `checkpoints/epoch_NNN.pt` every `5` epochs and on the final epoch
 - checkpoints include model, optimizer, scheduler and AMP scaler state
 - append-only `metrics.jsonl` plus final `summary.json`
-- persistence: `MyDrive/resistor_model/segmentation-m2-lraspp`
+- persistence: `MyDrive/resistor_model/segmentation-v4-lraspp`
 - automatic resume from `last.pt`
 - automatic ONNX export of `best.pt`
 - final ZIP package of the complete persistent run directory for download
@@ -67,13 +67,12 @@ Then run:
 
 ```bash
 resistor-train-segmentation \
-  --dataset-root /path/to/detection_res \
+  --dataset-root /path/to/resistor_sam3_merged \
   --category resistor \
-  --category res \
   --output-dir runs/resistor_segmentation
 ```
 
-The defaults print progress every 10 batches and write a numbered checkpoint every 5 epochs. Both can be changed or disabled:
+The standalone CLI defaults print progress every 10 batches (Colab overrides to every batch) and write a numbered checkpoint every 5 epochs. Both can be changed or disabled:
 
 ```bash
 resistor-train-segmentation ... \
