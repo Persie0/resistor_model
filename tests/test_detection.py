@@ -7,6 +7,7 @@ import torch
 
 from resistor_model.detection import (
     CocoResistorDetectionDataset,
+    _compact_coco_payload,
     build_ssdlite_model,
     collate_detection_batch,
 )
@@ -74,3 +75,28 @@ def test_ssdlite_builder_is_one_class_and_does_not_require_pretrained_weights():
     model = build_ssdlite_model(num_classes=2, pretrained_backbone=False)
     assert model.transform.min_size == (320,)
     assert model.transform.max_size == 320
+
+
+def test_bbox_compaction_discards_large_segmentation_payload():
+    coco = {
+        "images": [{"id": 1, "file_name": "x.jpg", "width": 100, "height": 50}],
+        "categories": [{"id": 9, "name": "resistor"}],
+        "annotations": [{
+            "image_id": 1,
+            "category_id": 9,
+            "bbox": [1, 2, 30, 10],
+            "iscrowd": 0,
+            "segmentation": {"size": [50, 100], "counts": "x" * 100000},
+            "sam3_score": 0.99,
+        }],
+    }
+    categories, images, annotations = _compact_coco_payload(coco)
+    assert categories == {9: "resistor"}
+    assert images[0]["file_name"] == "x.jpg"
+    assert annotations == [{
+        "image_id": 1,
+        "category_id": 9,
+        "bbox": [1.0, 2.0, 30.0, 10.0],
+        "iscrowd": 0,
+    }]
+    assert "segmentation" not in annotations[0]
