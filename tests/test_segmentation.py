@@ -111,3 +111,72 @@ def test_dataset_prefers_resistor_named_categories_over_other_annotations(tmp_pa
     _, mask = dataset[0]
     assert int(mask[5, 5]) == 1
     assert int(mask[15, 15]) == 0
+
+
+
+def test_v4_semantic_png_masks_override_coco_bbox_and_rle(tmp_path: Path):
+    """The v4 training target must be the SAM binary silhouette, not its bbox."""
+    import numpy as np
+
+    split = tmp_path / "train"
+    (split / "images").mkdir(parents=True)
+    (split / "masks_semantic").mkdir()
+
+    Image.new("RGB", (20, 10), "white").save(split / "images" / "000001_sha.jpg")
+    binary = np.zeros((10, 20), dtype=np.uint8)
+    binary[2:8, 8:12] = 255
+    binary[4:6, 3:17] = 255
+    Image.fromarray(binary).save(split / "masks_semantic" / "000001_sha.png")
+
+    # Deliberately contains a bbox that covers background; the PNG is authoritative.
+    payload = {
+        "images": [{"id": 1, "file_name": "images/000001_sha.jpg", "width": 20, "height": 10}],
+        "categories": [{"id": 1, "name": "resistor"}],
+        "annotations": [{
+            "image_id": 1, "category_id": 1,
+            "bbox": [0, 0, 20, 10], "segmentation": {"size": [10, 20], "counts": "bad"}
+        }],
+    }
+    (split / "_annotations.coco.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    dataset = CocoResistorSegmentationDataset(
+        tmp_path, "train", image_size=40, augment=False, category_names=("resistor",)
+    )
+    assert len(dataset) == 1
+    image, target = dataset[0]
+    assert image.shape == (3, 40, 40)
+    assert target.shape == (40, 40)
+    # Source 20x10 letterboxes into 40x20 with top 10 rows black.
+    assert int(target[14, 20]) == 1
+    assert int(target[14, 4]) == 0
+    assert int(target[2, 20]) == 0
+
+
+def test_v4_png_pairing_fails_fast_when_mask_missing(tmp_path: Path):
+    split = tmp_path / "train"
+    (split / "images").mkdir(parents=True)
+    (split / "masks_semantic").mkdir()
+    Image.new("RGB", (20, 10), "white").save(split / "images" / "a.jpg")
+    (split / "_annotations.coco.json").write_text(
+        json.dumps({"images": [], "annotations": [], "categories": []}),
+        encoding="utf-8",
+    )
+    import pytest
+    with pytest.raises(ValueError, match="mask"):
+        CocoResistorSegmentationDataset(tmp_path, "train", image_size=32)
+
+
+def test_v4_png_masks_validate_dimensions(tmp_path: Path):
+    split = tmp_path / "train"
+    (split / "images").mkdir(parents=True)
+    (split / "masks_semantic").mkdir()
+    Image.new("RGB", (20, 10), "white").save(split / "images" / "a.png")
+    Image.new("L", (8, 8), 255).save(split / "masks_semantic" / "a.png")
+    (split / "_annotations.coco.json").write_text(
+        json.dumps({"images": [], "annotations": [], "categories": []}),
+        encoding="utf-8",
+    )
+    dataset = CocoResistorSegmentationDataset(tmp_path, "train", image_size=32)
+    import pytest
+    with pytest.raises(ValueError, match="shape|size|dimensions"):
+        dataset[0]

@@ -23,7 +23,7 @@ from resistor_model.alignment import (
 )
 
 MODEL_PATH = Path(
-    "/content/drive/MyDrive/resistor_model/segmentation-m2-lraspp/"
+    "/content/drive/MyDrive/resistor_model/segmentation-v4-lraspp/"
     "resistor_segmenter_lraspp.onnx"
 )
 IMAGE_SIZE = 384
