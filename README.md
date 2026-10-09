@@ -204,9 +204,13 @@ Use `colab/train_resistor_detector_colab.ipynb` for the one-click GPU workflow. 
 
 See `docs/resistor_detection.md` for local training/export commands and model I/O.
 
+## Train v4 SAM-mask segmentation in Colab
+
+Use `colab/train_resistor_segmentation_colab.ipynb` to train binary LR-ASPP with the exact SAM 3.1 masks from release `v4/resistor_sam3_merged.zip`. Output and resumable checkpoints go to `MyDrive/resistor_model/segmentation-v4-lraspp`, separately from the previous m2 training run. See `docs/resistor_segmentation.md`.
+
 ## Test whole-resistor segmentation and alignment in Colab
 
-Use `colab/test_resistor_segmentation_alignment_colab.ipynb` after exporting `resistor_segmenter_lraspp.onnx` to the default Drive path. The notebook uploads a photo, runs the whole-resistor segmenter, and estimates the resistor long axis from a weighted consensus of robust `fitLine`, PCA, `minAreaRect`, and the longest convex-hull chord. Angle outliers are rejected before rotation.
+Use `colab/test_resistor_segmentation_alignment_colab.ipynb` after exporting `resistor_segmenter_lraspp.onnx` to the v4 Drive path. The notebook uploads a photo, runs the whole-resistor segmenter, and estimates the resistor long axis from a weighted consensus of robust `fitLine`, PCA, `minAreaRect`, and the longest convex-hull chord. Angle outliers are rejected before rotation.
 
 It displays the segmentation probability, cleaned mask, detected consensus axis, the final **vertically aligned** crop, and a **horizontal BandNet-ready** crop. The reusable undirected-angle and OpenCV rotation helpers live in `src/resistor_model/alignment.py` and are covered by unit tests.
 
