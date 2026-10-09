@@ -53,6 +53,10 @@ Defaults:
 - automatic ONNX export of `best.pt`
 - final ZIP package of the complete persistent run directory for download
 
+### Test on personal photos after training
+
+The training notebook includes a separate final cell **Test the trained model on your photos**. Run that cell after training, or run it independently once `best.pt` is available in Google Drive; it does not retrain. If the ONNX export is missing or older than the best checkpoint, it exports `best.pt` automatically. Upload one or more JPG/PNG resistor images to see the foreground probability, cleaned mask, detection overlay, long-axis estimate, rotated crop and horizontal BandNet crop. You can rerun only the test cell with different images. The same visual tester is also available in `colab/test_resistor_segmentation_alignment_colab.ipynb`.
+
 If the Colab/browser download fails, all checkpoints and metrics remain in Google Drive.
 
 ## Local training

@@ -279,30 +279,19 @@ def load_session() -> ort.InferenceSession:
     return ort.InferenceSession(str(MODEL_PATH), providers=providers)
 
 
-def main() -> None:
-    from google.colab import drive, files
-
-    drive.mount("/content/drive", force_remount=False)
-    if not MODEL_PATH.is_file():
-        raise FileNotFoundError(f"ONNX model not found: {MODEL_PATH}")
-
-    session = load_session()
-    input_info = session.get_inputs()[0]
-    output_info = session.get_outputs()[0]
-    print(f"Model: {MODEL_PATH}")
-    print(f"Providers: {session.get_providers()}")
-    print(f"Input: {input_info.name} {input_info.shape}")
-    print(f"Output: {output_info.name} {output_info.shape}")
-    print("\nUpload a resistor photo:")
-    uploaded = files.upload()
-    if not uploaded:
-        raise RuntimeError("No image uploaded.")
-    filename = next(iter(uploaded))
-    raw = np.frombuffer(uploaded[filename], dtype=np.uint8)
+def test_uploaded_image(
+    filename: str,
+    image_bytes: bytes,
+    session: ort.InferenceSession,
+    input_info,
+    output_info,
+) -> None:
+    raw = np.frombuffer(image_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
     if bgr is None:
-        raise RuntimeError(f"Could not decode {filename}")
+        raise ValueError(f"Unable to decode image {filename!r}")
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    print(f"\n--- Image: {filename} ---")
 
     tensor, letterbox_info = preprocess(rgb)
     probability = session.run([output_info.name], {input_info.name: tensor})[0][0, 0]
@@ -364,6 +353,34 @@ def main() -> None:
     plt.axis("off")
     plt.tight_layout()
     plt.show()
+
+
+def main() -> None:
+    from google.colab import drive, files
+
+    drive.mount("/content/drive", force_remount=False)
+    if not MODEL_PATH.is_file():
+        raise FileNotFoundError(f"ONNX model not found: {MODEL_PATH}")
+
+    session = load_session()
+    input_info = session.get_inputs()[0]
+    output_info = session.get_outputs()[0]
+    print(f"Model: {MODEL_PATH}")
+    print(f"Providers: {session.get_providers()}")
+    print(f"Input: {input_info.name} {input_info.shape}")
+    print(f"Output: {output_info.name} {output_info.shape}")
+    print("\nUpload one or more resistor photos:")
+    uploaded = files.upload()
+    if not uploaded:
+        print("No images uploaded; rerun the test cell when ready.")
+        return
+
+    for filename, data in uploaded.items():
+        try:
+            test_uploaded_image(filename, data, session, input_info, output_info)
+        except (RuntimeError, ValueError, cv2.error) as exc:
+            print(f"{filename}: could not process image: {exc}")
+
 
 
 if __name__ == "__main__":
