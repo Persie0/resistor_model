@@ -4,6 +4,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import torch
+import pytest
+
+from resistor_model.train_detection import _make_loader
 
 from resistor_model.detection import (
     CocoResistorDetectionDataset,
@@ -100,3 +103,44 @@ def test_bbox_compaction_discards_large_segmentation_payload():
         "iscrowd": 0,
     }]
     assert "segmentation" not in annotations[0]
+
+
+def test_training_loader_drops_only_singleton_tail_batches():
+    device = torch.device("cpu")
+    dataset = [(torch.zeros(3, 4, 4), {})] * 17
+    loader = _make_loader(
+        dataset, batch_size=16, shuffle=True, num_workers=0, device=device
+    )
+    assert loader.drop_last is True
+    assert len(loader) == 1
+
+    dataset = dataset + [(torch.zeros(3, 4, 4), {})]
+    loader = _make_loader(
+        dataset, batch_size=16, shuffle=True, num_workers=0, device=device
+    )
+    assert loader.drop_last is False
+    assert len(loader) == 2
+
+
+def test_training_loader_uses_small_dataset_without_singleton():
+    device = torch.device("cpu")
+    dataset = [(torch.zeros(3, 4, 4), {})] * 3
+    loader = _make_loader(
+        dataset, batch_size=16, shuffle=True, num_workers=0, device=device
+    )
+    assert loader.batch_size == 3
+    assert len(loader) == 1
+
+    with pytest.raises(ValueError, match="at least two images"):
+        _make_loader(
+            dataset[:1], batch_size=16, shuffle=True, num_workers=0, device=device
+        )
+
+
+def test_validation_loader_keeps_singleton_tail():
+    dataset = [(torch.zeros(3, 4, 4), {})] * 17
+    loader = _make_loader(
+        dataset, batch_size=16, shuffle=False, num_workers=0, device=torch.device("cpu")
+    )
+    assert loader.drop_last is False
+    assert len(loader) == 2
