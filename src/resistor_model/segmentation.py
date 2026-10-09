@@ -97,6 +97,37 @@ class CocoResistorSegmentationDataset(Dataset):
     ) -> None:
         self.root = Path(root)
         self.split_dir = _find_split_dir(self.root, split)
+        # The v4 SAM 3.1 release already ships exact binary body masks.
+        # Read paired PNGs directly: COCO RLE parsing is expensive and older
+        # Roboflow polygon/bbox fallback would destroy the SAM silhouettes.
+        mask_dir = self.split_dir / "masks_semantic"
+        if mask_dir.is_dir():
+            wanted = {name.strip().casefold() for name in category_names} if category_names else None
+            if wanted is not None and "resistor" not in wanted:
+                raise ValueError("v4 semantic PNG masks represent the 'resistor' foreground class")
+            image_dir = self.split_dir / "images"
+            image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+            images = {
+                path.stem: path
+                for path in image_dir.iterdir()
+                if path.is_file() and path.suffix.casefold() in image_extensions
+            } if image_dir.is_dir() else {}
+            masks = sorted(path for path in mask_dir.glob("*.png") if path.is_file())
+            missing_images = [mask.name for mask in masks if mask.stem not in images]
+            missing_masks = [stem for stem in images if not (mask_dir / f"{stem}.png").is_file()]
+            if not masks or missing_images or missing_masks:
+                raise ValueError(
+                    f"Invalid v4 semantic mask/image pairs in {self.split_dir}: "
+                    f"masks={len(masks)}, images={len(images)}, "
+                    f"missing images={missing_images[:5]}, missing masks={missing_masks[:5]}"
+                )
+            self.samples = [(images[mask.stem], {}, mask) for mask in masks]
+            self.category_ids = {1}
+            self.image_size = int(image_size)
+            self.augment = bool(augment)
+            self.color_jitter = ColorJitter(brightness=0.25, contrast=0.25, saturation=0.15, hue=0.03)
+            return
+
         payload = json.loads((self.split_dir / "_annotations.coco.json").read_text(encoding="utf-8"))
         wanted = {name.strip().casefold() for name in category_names} if category_names else None
         categories = {
@@ -134,10 +165,21 @@ class CocoResistorSegmentationDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        path, _image_meta, annotations = self.samples[index]
-        image = Image.open(path).convert("RGB")
+        path, _image_meta, annotations_or_mask = self.samples[index]
+        with Image.open(path) as raw_image:
+            image = raw_image.convert("RGB")
         width, height = image.size
-        mask = _mask_from_annotations(width, height, annotations, self.category_ids)
+        if isinstance(annotations_or_mask, Path):
+            with Image.open(annotations_or_mask) as raw_mask:
+                if raw_mask.size != (width, height):
+                    raise ValueError(
+                        f"v4 semantic mask dimensions {raw_mask.size} do not match "
+                        f"image dimensions {(width, height)}: {annotations_or_mask}"
+                    )
+                # SAM masks use 0=background and 255=foreground.
+                mask = raw_mask.convert("L").point(lambda value: 1 if value > 0 else 0)
+        else:
+            mask = _mask_from_annotations(width, height, annotations_or_mask, self.category_ids)
         image, mask = _letterbox_pair(image, mask, self.image_size)
 
         if self.augment:
