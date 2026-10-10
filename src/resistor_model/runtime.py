@@ -8,6 +8,7 @@ from torch import nn
 from resistor_model.data.schema import load_manifest
 from resistor_model.data.split import grouped_split
 from resistor_model.models.bandnet import ResistorBandNet
+from resistor_model.models.bandnet_mobile import ResistorBandNetMobile1D
 from resistor_model.models.bandnet_v2 import ResistorBandNetV2
 
 
@@ -37,6 +38,14 @@ def build_model(cfg: dict) -> nn.Module:
             backbone=str(model_cfg.get("backbone", "convnext_lite")),
             pretrained=bool(model_cfg.get("pretrained", False)),
             drop_path=float(model_cfg.get("drop_path", 0.1)),
+            conv_kernel=int(model_cfg.get("conv_kernel", 7)),
+        )
+    if architecture == "mobile1d":
+        return ResistorBandNetMobile1D(
+            **common,
+            backbone=str(model_cfg.get("backbone", "mobile1d")),
+            pretrained=bool(model_cfg.get("pretrained", False)),
+            drop_path=float(model_cfg.get("drop_path", 0.0)),
             conv_kernel=int(model_cfg.get("conv_kernel", 7)),
         )
     raise ValueError(f"unsupported model architecture: {architecture!r}")

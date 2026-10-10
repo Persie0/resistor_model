@@ -245,6 +245,62 @@ def _color_weights(
     return weights.to(device=device, dtype=torch.float32)
 
 
+def _distill_kl(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Temperature-scaled KL(student || teacher) averaged over all non-class dims."""
+    temp = max(float(temperature), 1e-6)
+    log_p = torch.nn.functional.log_softmax(student_logits.float() / temp, dim=-1)
+    with torch.no_grad():
+        q = torch.nn.functional.softmax(teacher_logits.float() / temp, dim=-1)
+    kl = torch.nn.functional.kl_div(log_p, q, reduction="none").sum(dim=-1).mean()
+    return kl * (temp * temp)
+
+
+@torch.no_grad()
+def _teacher_outputs(teacher, teacher_size: tuple[int, int] | None, images: torch.Tensor):
+    if teacher_size is not None and tuple(images.shape[-2:]) != tuple(teacher_size):
+        images = torch.nn.functional.interpolate(images, size=list(teacher_size), mode="bilinear", align_corners=False)
+    return teacher(images)
+
+
+def _distillation_loss(
+    student_out: dict,
+    teacher_out: dict,
+    temperature: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    dense_s = student_out["dense_logits"].transpose(1, 2)  # [B, bins, classes]
+    dense_t = teacher_out["dense_logits"].transpose(1, 2)
+    if dense_t.shape[1] != dense_s.shape[1]:
+        dense_t = torch.nn.functional.interpolate(
+            teacher_out["dense_logits"], size=dense_s.shape[1], mode="linear", align_corners=False
+        ).transpose(1, 2)
+    dense_kl = _distill_kl(dense_s, dense_t, temperature)
+    slot_kl = _distill_kl(student_out["slot_color_logits"], teacher_out["slot_color_logits"], temperature)
+    total = 0.5 * (dense_kl + slot_kl)
+    return total, {"distill_dense": dense_kl, "distill_slot": slot_kl}
+
+
+def _load_teacher(cfg: dict, device: torch.device):
+    """Load an optional frozen teacher for distillation; returns (model, size) or (None, None)."""
+    distill_cfg = cfg.get("distill", {})
+    ckpt_path = distill_cfg.get("teacher_checkpoint")
+    if not ckpt_path:
+        return None, None
+    from pathlib import Path as _Path
+
+    from resistor_model.runtime import build_model as _build_model
+
+    checkpoint = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+    teacher_cfg = checkpoint.get("config", cfg)
+    teacher = _build_model(teacher_cfg).to(device).eval()
+    teacher.load_state_dict(checkpoint.get("model_state", checkpoint))
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    size = tuple(teacher_cfg["data"]["output_size"]) if "data" in teacher_cfg else None
+    if _Path(str(ckpt_path)).is_file():
+        _print_status(f"[distill] teacher loaded from {ckpt_path} (size {size})")
+    return teacher, size
+
+
 def train_one_epoch(
     model,
     ema,
@@ -259,6 +315,8 @@ def train_one_epoch(
     epoch: int = 1,
     epochs: int = 1,
     show_progress: bool = True,
+    teacher=None,
+    teacher_size: tuple[int, int] | None = None,
 ) -> dict[str, float]:
     model.train()
     weights = _loss_weights(cfg)
@@ -297,6 +355,15 @@ def train_one_epoch(
                 dense_class_weights=dense_weights,
                 color_class_weights=color_weights,
             )
+            distill_weight = float(cfg.get("distill", {}).get("weight", 0.0) or 0.0)
+            if teacher is not None and distill_weight > 0:
+                teacher_out = _teacher_outputs(teacher, teacher_size, batch["image"])
+                distill_total, distill_parts = _distillation_loss(
+                    out, teacher_out, float(cfg.get("distill", {}).get("temperature", 3.0)),
+                )
+                loss.parts["distill"] = distill_total.detach()
+                loss.parts.update({k: v.detach() for k, v in distill_parts.items()})
+                loss.total = loss.total + distill_weight * distill_total
         scaler.scale(loss.total).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["train"]["grad_clip"]))
@@ -458,6 +525,9 @@ def main() -> None:
     best_key = (-1.0, -1.0)
     parameters = sum(parameter.numel() for parameter in model.parameters())
     _print_status(f"[setup] model ready | parameters {parameters / 1_000_000:.2f}M")
+    teacher, teacher_size = _load_teacher(cfg, device)
+    if teacher is None:
+        _print_status("[distill] disabled (no teacher checkpoint)")
     resume = cfg["train"].get("resume")
     if resume:
         _print_status(f"[setup] loading checkpoint {resume}...")
@@ -499,6 +569,8 @@ def main() -> None:
             max_batches=1 if args.smoke else None,
             epoch=epoch + 1,
             epochs=epochs,
+            teacher=teacher,
+            teacher_size=teacher_size,
         )
         val_metrics = evaluate_loader(
             ema.model,

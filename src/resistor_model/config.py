@@ -70,6 +70,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "extra_decoders": False,
         "series_bonus": 0.0,
     },
+    "distill": {
+        "teacher_checkpoint": None,
+        "weight": 0.0,
+        "temperature": 3.0,
+    },
 }
 
 
@@ -101,8 +106,8 @@ def validate_config(cfg: dict) -> None:
         raise ValueError("model.max_bands must be >= 1")
     if model_cfg["d_model"] % model_cfg["transformer_heads"] != 0:
         raise ValueError("model.d_model must be divisible by model.transformer_heads")
-    if str(model_cfg.get("architecture", "v1")).lower() not in {"v1", "v2"}:
-        raise ValueError("model.architecture must be v1 or v2")
+    if str(model_cfg.get("architecture", "v1")).lower() not in {"v1", "v2", "mobile1d"}:
+        raise ValueError("model.architecture must be v1, v2 or mobile1d")
     if int(model_cfg.get("conv_kernel", 7)) < 1 or int(model_cfg.get("conv_kernel", 7)) % 2 == 0:
         raise ValueError("model.conv_kernel must be a positive odd integer")
 
@@ -121,6 +126,12 @@ def validate_config(cfg: dict) -> None:
         raise ValueError("loss.color_balance must be none or sqrt_inverse")
     if float(loss_cfg.get("max_color_weight", 4.0)) < 1.0:
         raise ValueError("loss.max_color_weight must be >= 1")
+
+    distill_cfg = cfg.get("distill", {})
+    if float(distill_cfg.get("weight", 0.0)) < 0.0:
+        raise ValueError("distill.weight must be >= 0")
+    if float(distill_cfg.get("temperature", 3.0)) <= 0.0:
+        raise ValueError("distill.temperature must be > 0")
 
 
 def load_config(path: str | Path | None = None) -> dict:

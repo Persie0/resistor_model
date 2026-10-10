@@ -1,0 +1,75 @@
+seed: 42
+
+data:
+  manifest: data/rres-v4/manifest.jsonl
+  image_root: data/rres-v4
+  splits_file: data/rres-v4/splits.json
+  # Body-only horizontal crops need far less resolution than full-scene V2.
+  output_size: [64, 384]
+  sequence_bins: 192
+  group_session: true
+  split_ratios: [0.70, 0.15, 0.15]
+  num_workers: 4
+  # Segmentation already rectifies to horizontal; keep flips for the unknown
+  # 180-degree direction, shrink rotation jitter via lower jitter_strength.
+  geometric_augment: true
+  hflip_prob: 0.5
+  vflip_prob: 0.5
+  jitter_strength: 0.7
+
+model:
+  architecture: mobile1d
+  backbone: mobile1d
+  pretrained: false
+  num_colors: 12
+  max_bands: 6
+  base_channels: 24
+  d_model: 128
+  transformer_layers: 3
+  transformer_heads: 4
+  slot_decoder_layers: 2
+  dropout: 0.10
+  drop_path: 0.0
+  conv_kernel: 7
+  # Cheap 2-channel log-ratio prepend, NOT a second encoder.
+  use_chromatic_branch: true
+
+train:
+  epochs: 60
+  batch_size: 32
+  lr: 0.0005
+  weight_decay: 0.04
+  warmup_epochs: 3
+  grad_clip: 1.0
+  amp: true
+  ema_decay: 0.995
+  output_dir: runs/rres-v4-mobile1d
+  resume: null
+
+loss:
+  dense: 1.0
+  color: 2.0
+  exist: 0.5
+  center: 1.0
+  width: 0.5
+  # Keep small: left-to-right order is arbitrary under 180-degree ambiguity.
+  order: 0.05
+  count: 0.3
+  consistency: 0.0
+  ctc: 0.2
+  kl: 0.0
+  label_smoothing: 0.05
+  body_class_weight: 0.25
+  color_balance: sqrt_inverse
+  max_color_weight: 4.0
+
+eval:
+  extra_decoders: true
+  series_bonus: 0.0
+
+# Optional teacher distillation from a trained V2 checkpoint. Disabled by
+# default; the mobile1d Colab enables it when r1-v2-colab/best.pt exists.
+distill:
+  teacher_checkpoint: null
+  weight: 0.5
+  temperature: 3.0
