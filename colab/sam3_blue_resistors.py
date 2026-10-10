@@ -447,8 +447,11 @@ for record_index, record in enumerate(records, 1):
 
     accepted = None
     if len(scores) > 0:
-        best_candidate_index = int(np.argmax(scores))
-        best_score = float(scores[best_candidate_index])
+        # Empty masks cannot be exported, even when their confidence is highest.
+        nonempty = masks.reshape(len(scores), -1).any(axis=1)
+        ranked_scores = np.where(nonempty, scores, -np.inf)
+        best_candidate_index = int(np.argmax(ranked_scores))
+        best_score = float(ranked_scores[best_candidate_index])
         best_mask = masks[best_candidate_index]
         if best_score >= MIN_ACCEPT_SCORE and best_mask.any():
             mask_filename = f"{stable_key_hash(image_key)}.png"
