@@ -513,7 +513,7 @@ def latest_resume_checkpoint() -> str | None:
 
 def print_run_configuration(dataset_root: Path, resume: str | None) -> None:
     print("\nPP-LiteSeg training configuration", flush=True)
-    print("  model: PP-LiteSeg-T (STDC1), binary background-vs-body", flush=True)
+    print("  model: PP-LiteSeg (STDC backbone from base config), binary background-vs-body", flush=True)
     print("  release: v4 / resistor_sam3_merged.zip + ee / blue_resistors_sam3.zip (blue_* stems)", flush=True)
     print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
     print(f"  dataset: {dataset_root}", flush=True)
