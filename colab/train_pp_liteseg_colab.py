@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v9-loader-tuning"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v10-streamed-pip"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -274,13 +274,19 @@ def install_paddle() -> None:
         ["paddlepaddle-gpu", "-i", PADDLE_GPU_INDEXES[1]],
     ]
     last_error: Exception | None = None
+    print("[paddle] downloading the ~1 GB GPU wheel; this takes a few minutes, progress below", flush=True)
     for attempt in attempts:
         try:
-            _pip_install(["-q", *attempt], description=f"paddle install ({' '.join(attempt)})")
+            # No -q here and streamed (not captured): pip's download progress
+            # bar is the only sign of life during this multi-minute step.
+            run_with_heartbeat(
+                [sys.executable, "-m", "pip", "install", *attempt],
+                heartbeat_seconds=60,
+            )
             break
         except subprocess.CalledProcessError as exc:
             last_error = exc
-            print(f"[paddle] attempt failed, trying next index/version...", flush=True)
+            print("[paddle] attempt failed, trying next index/version...", flush=True)
     else:
         raise RuntimeError("Could not install paddlepaddle-gpu from any official index") from last_error
     import paddle  # noqa: E402  (verify install before the long training run)
