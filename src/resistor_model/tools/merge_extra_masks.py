@@ -115,11 +115,12 @@ def main() -> None:
     parser.add_argument("--splits", nargs="+", default=["train", "valid", "test"])
     parser.add_argument("--prefix", type=str, default="blue")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--progress-every", type=int, default=100)
     args = parser.parse_args()
     report = merge_archive(
         args.dataset_root, args.extra_archive, splits=list(args.splits),
         prefix=str(args.prefix), expected_sha256=args.extra_sha256,
-        overwrite=bool(args.overwrite),
+        overwrite=bool(args.overwrite), progress_every=int(args.progress_every),
     )
     for split, stats in report.items():
         print(f"[merge] {split}: " + ", ".join(f"{k}={v}" for k, v in stats.items()), flush=True)

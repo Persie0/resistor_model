@@ -202,6 +202,30 @@ def test_pp_liteseg_colab_normalizes_masks_to_class_indices():
     assert "normalize_masks_01(dataset_root)" in text
 
 
+def test_pp_liteseg_colab_sets_pythonpath_for_paddleseg_tools():
+    # tools/train.py does `from paddleseg...` but the script's own dir lands
+    # on sys.path, not the repo root: without PYTHONPATH -> ModuleNotFoundError.
+    text = (Path(__file__).resolve().parents[1] / "colab" / "train_pp_liteseg_colab.py").read_text(encoding="utf-8")
+    assert "extra_env" in text
+    assert 'extra_env={"PYTHONPATH": str(PADDLESEG_DIR)}' in text
+
+
+def test_merge_and_synth_tools_accept_progress_every_flag():
+    import os
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo / "src"))
+    for tool in ("merge_extra_masks", "synthesize_body_colors"):
+        proc = subprocess.run(
+            [sys.executable, "-m", f"resistor_model.tools.{tool}", "--help"],
+            capture_output=True, text=True, cwd=repo, env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "--progress-every" in proc.stdout
+
+
 def test_merge_and_synth_tools_report_incremental_progress():
     import inspect
 

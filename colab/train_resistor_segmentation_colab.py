@@ -397,6 +397,7 @@ def synthesize_body_colors(dataset_root: Path) -> None:
         "--splits", "train",
         "--variants", *SYNTH_VARIANTS,
         "--seed", str(SYNTH_SEED),
+        "--progress-every", "500",
     ]
     run(command, cwd=REPO)
 

@@ -167,6 +167,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--progress-every", type=int, default=25)
     args = parser.parse_args()
 
     rng = np.random.default_rng(int(args.seed))
@@ -182,6 +183,7 @@ def main() -> None:
         records = synthesize_split(
             args.dataset_root / split, variants=list(args.variants), rng=rng,
             jpeg_quality=int(args.jpeg_quality), overwrite=bool(args.overwrite),
+            progress_every=int(args.progress_every),
         )
         for row in records:
             existing[row["image"]] = row

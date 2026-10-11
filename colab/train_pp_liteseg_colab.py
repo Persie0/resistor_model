@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v6-mask01-nocache"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v7-pythonpath-progress"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -113,6 +113,7 @@ def run_with_heartbeat(
     *,
     cwd: Path | None = None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """Stream a long command (training); heartbeat while the child is silent.
 
@@ -124,6 +125,8 @@ def run_with_heartbeat(
     print("+", " ".join(map(str, cmd)), flush=True)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    if extra_env:
+        env.update(extra_env)
     process = subprocess.Popen(
         cmd,
         cwd=str(cwd) if cwd else None,
@@ -382,6 +385,7 @@ def merge_blue_dataset(dataset_root: Path) -> None:
         "--extra-sha256", BLUE_DATASET_SHA256,
         "--splits", "train", "valid", "test",
         "--prefix", "blue",
+        "--progress-every", "200",
     ])
 
 
@@ -396,6 +400,7 @@ def synthesize_body_colors(dataset_root: Path) -> None:
         "--splits", "train",
         "--variants", *SYNTH_VARIANTS,
         "--seed", str(SYNTH_SEED),
+        "--progress-every", "500",
     ])
 
 
@@ -581,8 +586,11 @@ def train(config: Path) -> None:
         command.extend(["--resume_model", resume])
     print_run_configuration(find_dataset_root(DATASET_ROOT), resume)
     stop_sync = _start_drive_sync()
+    # tools/train.py does `from paddleseg...`: the script's own dir (tools/)
+    # lands on sys.path, not the repo root, so point PYTHONPATH at PaddleSeg.
+    paddle_env = {"PYTHONPATH": str(PADDLESEG_DIR)}
     try:
-        run_with_heartbeat(command, cwd=PADDLESEG_DIR)
+        run_with_heartbeat(command, cwd=PADDLESEG_DIR, extra_env=paddle_env)
     finally:
         stop_sync.set()
     print("[train] final sync of outputs to Drive...", flush=True)
@@ -596,12 +604,12 @@ def export_and_convert() -> Path | None:
         return None
     inference_dir = WORK / "inference"
     try:
-        run([
+        run_with_heartbeat([
             sys.executable, str(PADDLESEG_DIR / "tools" / "export.py"),
             "--config", str(CUSTOM_CONFIG),
             "--model_path", str(best),
             "--save_dir", str(inference_dir),
-        ], cwd=PADDLESEG_DIR)
+        ], cwd=PADDLESEG_DIR, extra_env={"PYTHONPATH": str(PADDLESEG_DIR)})
     except subprocess.CalledProcessError as exc:
         (RUN_DIR / "export_error.txt").write_text(str(exc), encoding="utf-8")
         print("[export] PaddleSeg export failed; run help: tools/export.py --help", flush=True)
