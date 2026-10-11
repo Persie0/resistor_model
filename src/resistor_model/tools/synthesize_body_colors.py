@@ -94,6 +94,7 @@ def synthesize_split(
     rng: np.random.Generator,
     jpeg_quality: int = 95,
     overwrite: bool = False,
+    progress_every: int = 25,
 ) -> list[dict]:
     images_dir = split_dir / "images"
     masks_dir = split_dir / "masks_semantic"
@@ -101,7 +102,10 @@ def synthesize_split(
         raise FileNotFoundError(f"expected v4 layout under {split_dir}: images/ + masks_semantic/")
     records: list[dict] = []
     masks = sorted(masks_dir.glob("*.png"))
-    for mask_path in masks:
+    total = len(masks)
+    for done, mask_path in enumerate(masks, start=1):
+        if progress_every > 0 and (done % progress_every == 0 or done == total):
+            print(f"[synth] {split_dir.name}: {done}/{total} images...", flush=True)
         stem = mask_path.stem
         if "_syn" in stem:
             continue  # never re-synthesize synthesis

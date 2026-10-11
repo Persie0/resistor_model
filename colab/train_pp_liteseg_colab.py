@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v4-streamed-progress"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v5-drive-sync-progress"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -63,6 +63,10 @@ IMAGE_SIZE = 512
 ITERS = 20000
 BATCH_SIZE = 16
 SAVE_INTERVAL = 1000
+# PaddleSeg only writes checkpoints locally; mirror them to Drive on this
+# cadence so a Colab disconnect loses minutes, not hours (like last.pt/best.pt
+# in the other recipes). Final sync still happens after training.
+CHECKPOINT_SYNC_SECONDS = 600
 HEARTBEAT_SECONDS = 30  # nudge printed when the trainer is silent this long
 NUM_CLASSES = 2  # background + resistor body
 # Train-only synthesis; valid/test stay real so metrics measure reality.
@@ -309,15 +313,35 @@ def find_dataset_root(root: Path) -> Path:
     return unique[0]
 
 
+def download_with_progress(url: str, destination: Path, *, label: str) -> None:
+    """Download with MiB progress lines (multi-hundred-MiB archives, like other colabs)."""
+    request = urllib.request.Request(url, headers={"User-Agent": "resistor-model-colab"})
+    hasher = hashlib.sha256()
+    downloaded = 0
+    print(f"[{label}] downloading...", flush=True)
+    with urllib.request.urlopen(request) as response, destination.open("wb") as out:
+        total = int(response.headers.get("Content-Length") or 0)
+        last_report = 0
+        while True:
+            chunk = response.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            hasher.update(chunk)
+            downloaded += len(chunk)
+            if downloaded - last_report >= 32 * 1024 * 1024 or (total and downloaded >= total):
+                progress = f" ({100 * downloaded / total:.0f}%)" if total else ""
+                print(f"[{label}] downloaded {downloaded / 1024 / 1024:.1f} MiB{progress}", flush=True)
+                last_report = downloaded
+    print(f"[{label}] done | {downloaded / 1024 / 1024:.1f} MiB | sha256 {hasher.hexdigest()[:16]}...", flush=True)
+
+
 def download_dataset() -> Path:
     WORK.mkdir(parents=True, exist_ok=True)
     if not (ARCHIVE.is_file() and archive_sha256(ARCHIVE) == DATASET_SHA256):
         if ARCHIVE.is_file():
             ARCHIVE.unlink()
-        print("[dataset] downloading v4 SAM-mask dataset...", flush=True)
-        request = urllib.request.Request(DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
-        with urllib.request.urlopen(request) as response, ARCHIVE.open("wb") as destination:
-            shutil.copyfileobj(response, destination)
+        download_with_progress(DATASET_URL, ARCHIVE, label="dataset")
         if archive_sha256(ARCHIVE) != DATASET_SHA256:
             ARCHIVE.unlink(missing_ok=True)
             raise RuntimeError("v4 archive checksum mismatch")
@@ -344,10 +368,7 @@ def merge_blue_dataset(dataset_root: Path) -> None:
             print("[blue] stale/incomplete archive; downloading again", flush=True)
             BLUE_ARCHIVE.unlink()
     if not BLUE_ARCHIVE.is_file():
-        print("[blue] downloading blue-resistor SAM dataset...", flush=True)
-        request = urllib.request.Request(BLUE_DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
-        with urllib.request.urlopen(request) as response, BLUE_ARCHIVE.open("wb") as destination:
-            shutil.copyfileobj(response, destination)
+        download_with_progress(BLUE_DATASET_URL, BLUE_ARCHIVE, label="blue")
         if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
             BLUE_ARCHIVE.unlink(missing_ok=True)
             raise RuntimeError("blue archive checksum mismatch")
@@ -463,16 +484,50 @@ def print_run_configuration(dataset_root: Path, resume: str | None) -> None:
     print("  release: v4 / resistor_sam3_merged.zip + ee / blue_resistors_sam3.zip (blue_* stems)", flush=True)
     print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
     print(f"  dataset: {dataset_root}", flush=True)
+    for split in ("train", "valid", "test"):
+        pairs = len(list((dataset_root / split / "masks_semantic").glob("*.png")))
+        print(f"  pairs {split}: {pairs}", flush=True)
     print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
     print(f"  iters: {ITERS} | batch size: {BATCH_SIZE} | eval+save every {SAVE_INTERVAL}", flush=True)
     print(f"  body-color synth (train only): {', '.join(SYNTH_VARIANTS)}", flush=True)
     print(f"  heartbeat: every {HEARTBEAT_SECONDS}s during silent training", flush=True)
+    print(f"  drive checkpoint sync: every {CHECKPOINT_SYNC_SECONDS}s", flush=True)
     print(f"  persistent outputs: {RUN_DIR}", flush=True)
     if resume is None:
         print("  resume: no checkpoint found; starting fresh", flush=True)
     else:
         print(f"  resume: {resume}", flush=True)
     print("", flush=True)
+
+
+def _sync_dir_to_drive() -> None:
+    """Incremental local -> Drive mirror (rsync when available, else copytree)."""
+    OUTPUT_DRIVE.mkdir(parents=True, exist_ok=True)
+    rsync = shutil.which("rsync")
+    if rsync:
+        subprocess.run(
+            [rsync, "-a", "--prune-empty-dirs", f"{OUTPUT_LOCAL}/", f"{OUTPUT_DRIVE}/"],
+            check=True,
+        )
+    else:
+        shutil.copytree(OUTPUT_LOCAL, OUTPUT_DRIVE, dirs_exist_ok=True)
+
+
+def _start_drive_sync() -> threading.Event:
+    """Background mirror of PaddleSeg checkpoints to Drive; returns stop event."""
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(CHECKPOINT_SYNC_SECONDS):
+            try:
+                print("[drive-sync] syncing checkpoints to Drive...", flush=True)
+                _sync_dir_to_drive()
+                print("[drive-sync] checkpoints safe in Drive.", flush=True)
+            except Exception as exc:
+                print(f"[drive-sync] failed, training continues: {exc}", flush=True)
+
+    threading.Thread(target=loop, name="drive-checkpoint-sync", daemon=True).start()
+    return stop
 
 
 def train(config: Path) -> None:
@@ -497,9 +552,13 @@ def train(config: Path) -> None:
     if resume is not None:
         command.extend(["--resume_model", resume])
     print_run_configuration(find_dataset_root(DATASET_ROOT), resume)
-    run_with_heartbeat(command, cwd=PADDLESEG_DIR)
-    print("[train] syncing outputs to Drive...", flush=True)
-    shutil.copytree(OUTPUT_LOCAL, OUTPUT_DRIVE, dirs_exist_ok=True)
+    stop_sync = _start_drive_sync()
+    try:
+        run_with_heartbeat(command, cwd=PADDLESEG_DIR)
+    finally:
+        stop_sync.set()
+    print("[train] final sync of outputs to Drive...", flush=True)
+    _sync_dir_to_drive()
 
 
 def export_and_convert() -> Path | None:

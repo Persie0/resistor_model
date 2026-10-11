@@ -185,6 +185,25 @@ def test_pp_liteseg_colab_streams_progress_like_other_colabs():
     assert "run_with_heartbeat(command" in text
 
 
+def test_pp_liteseg_colab_syncs_checkpoints_to_drive_periodically():
+    text = (Path(__file__).resolve().parents[1] / "colab" / "train_pp_liteseg_colab.py").read_text(encoding="utf-8")
+    assert "CHECKPOINT_SYNC_SECONDS" in text
+    assert "def _start_drive_sync" in text
+    assert "def _sync_dir_to_drive" in text
+    assert "def download_with_progress" in text
+    assert "_start_drive_sync()" in text
+
+
+def test_merge_and_synth_tools_report_incremental_progress():
+    import inspect
+
+    from resistor_model.tools.merge_extra_masks import merge_archive
+    from resistor_model.tools.synthesize_body_colors import synthesize_split
+
+    assert inspect.signature(merge_archive).parameters["progress_every"].default == 100
+    assert inspect.signature(synthesize_split).parameters["progress_every"].default == 25
+
+
 def test_pp_liteseg_colab_installs_paddle_from_official_index():
     # Regression test: `pip install paddlepaddle-gpu` from default PyPI has no
     # Python 3.13 wheel (exit 1 with -q hiding the reason). The GPU build must

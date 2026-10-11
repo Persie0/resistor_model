@@ -53,6 +53,7 @@ def merge_archive(
     prefix: str = "blue",
     expected_sha256: str | None = None,
     overwrite: bool = False,
+    progress_every: int = 100,
 ) -> dict[str, dict[str, int]]:
     if expected_sha256 and sha256_of(archive) != expected_sha256:
         raise RuntimeError(f"checksum mismatch for {archive}")
@@ -69,7 +70,10 @@ def merge_archive(
             for n in names:
                 if n.startswith(img_prefix) and Path(n).suffix.lower() in IMAGE_EXTENSIONS:
                     by_stem.setdefault(Path(n).stem, n)
-            for mask_name in masks:
+            total = len(masks)
+            for done, mask_name in enumerate(masks, start=1):
+                if progress_every > 0 and (done % progress_every == 0 or done == total):
+                    print(f"[merge] {split}: {done}/{total} pairs...", flush=True)
                 stem = Path(mask_name).stem
                 img_name = by_stem.get(stem)
                 if img_name is None:
