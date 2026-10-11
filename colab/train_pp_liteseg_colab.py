@@ -37,9 +37,17 @@ import subprocess
 import sys
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v2-blue-synth"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v3-paddle-index-fix"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
+# NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
+# wheels), so the GPU build MUST come from Paddle's official index below.
+# cu126 matches Colab's CUDA 12.x runtimes; cu118 is the fallback.
+PADDLE_GPU_INDEXES = (
+    "https://www.paddlepaddle.org.cn/packages/stable/cu126/",
+    "https://www.paddlepaddle.org.cn/packages/stable/cu118/",
+)
+PADDLE_GPU_PIN = "3.1.1"  # known-present on the stable indexes; fallback is unpinned latest
 # Same v4 SAM-mask source as the LR-ASPP recipe.
 DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/v4/resistor_sam3_merged.zip"
 DATASET_SHA256 = "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
@@ -108,15 +116,73 @@ def clone_repos() -> None:
     run(["git", "clone", "--depth", "1", "--branch", PADDLESEG_BRANCH, PADDLESEG_REPO, str(PADDLESEG_DIR)])
 
 
-def install_dependencies() -> None:
-    run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
-    # PaddlePaddle GPU wheel + PaddleSeg deps (yaml, visualdl, ... come along).
-    run([sys.executable, "-m", "pip", "install", "-q", "paddlepaddle-gpu"])
-    run([sys.executable, "-m", "pip", "install", "-q", "-r", str(PADDLESEG_DIR / "requirements.txt")])
-    run([sys.executable, "-m", "pip", "install", "-q", "paddle2onnx", "onnx", "onnxruntime", "opencv-python", "pillow"])
+def _pip_install(args: list[str], *, description: str) -> None:
+    """pip install with the failing tail printed (pip -q hides the reason)."""
+    print("+", sys.executable, "-m pip install", " ".join(args), flush=True)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", *args],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stdout + "\n" + proc.stderr).strip().splitlines()[-25:]
+        print(f"[pip] {description} failed:", flush=True)
+        print("\n".join(tail), flush=True)
+        raise subprocess.CalledProcessError(proc.returncode, args)
+
+
+def install_paddle() -> None:
+    print(f"[paddle] python {sys.version.split()[0]}", flush=True)
+    if sys.version_info >= (3, 14):
+        raise RuntimeError(
+            "PaddlePaddle publishes no wheels for Python >= 3.14; "
+            "use a Colab runtime with Python 3.11-3.13."
+        )
+    attempts = [
+        [f"paddlepaddle-gpu=={PADDLE_GPU_PIN}", "-i", PADDLE_GPU_INDEXES[0]],
+        ["paddlepaddle-gpu", "-i", PADDLE_GPU_INDEXES[0]],
+        ["paddlepaddle-gpu", "-i", PADDLE_GPU_INDEXES[1]],
+    ]
+    last_error: Exception | None = None
+    for attempt in attempts:
+        try:
+            _pip_install(["-q", *attempt], description=f"paddle install ({' '.join(attempt)})")
+            break
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            print(f"[paddle] attempt failed, trying next index/version...", flush=True)
+    else:
+        raise RuntimeError("Could not install paddlepaddle-gpu from any official index") from last_error
     import paddle  # noqa: E402  (verify install before the long training run)
 
     print(f"paddle {paddle.__version__} | cuda: {paddle.device.cuda.device_count()} device(s)", flush=True)
+
+
+def install_dependencies() -> None:
+    run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
+    install_paddle()
+    # PaddleSeg requirements pinned `opencv-python <= 4.6.0`, which has no
+    # Python 3.13 wheel: skip it and use Colab's preinstalled cv2 instead.
+    req_lines = (PADDLESEG_DIR / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    filtered = [line for line in req_lines if line.strip() and "opencv" not in line.lower()]
+    filtered_req = WORK / "paddleseg-requirements-filtered.txt"
+    filtered_req.write_text("\n".join(filtered) + "\n", encoding="utf-8")
+    _pip_install(["-q", "-r", str(filtered_req)], description="paddleseg requirements")
+    try:
+        import cv2  # noqa: E402  (must exist: preinstalled or via requirements)
+
+        print(f"[deps] cv2 {cv2.__version__} OK", flush=True)
+    except ImportError as exc:
+        raise RuntimeError("No OpenCV available and the pinned one has no wheel for this Python") from exc
+
+
+def pip_best_effort(args: list[str], *, description: str) -> bool:
+    """Install optional conversion deps without ever failing the training run."""
+    try:
+        _pip_install(["-q", *args], description=description)
+        return True
+    except subprocess.CalledProcessError:
+        print(f"[deps] optional install failed, continuing without it: {description}", flush=True)
+        return False
 
 
 def archive_sha256(path: Path) -> str:
@@ -329,6 +395,7 @@ def export_and_convert() -> Path | None:
         print("[export] PaddleSeg export failed; run help: tools/export.py --help", flush=True)
         return None
     onnx_path = RUN_DIR / "resistor_segmenter_ppliteseg.onnx"
+    pip_best_effort(["paddle2onnx", "onnx"], description="paddle2onnx for ONNX export")
     try:
         run([
             sys.executable, "-m", "paddle2onnx",
@@ -345,7 +412,7 @@ def export_and_convert() -> Path | None:
         print("[export] paddle2onnx failed; inference model remains in Drive output.", flush=True)
         return None
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "onnx2tf", "onnxsim"])
+        pip_best_effort(["onnx2tf", "onnxsim"], description="onnx2tf for TFLite conversion")
         run([sys.executable, "-m", "onnx2tf", "-i", str(onnx_path), "-o", str(RUN_DIR / "tflite_tmp")])
         candidates = sorted((RUN_DIR / "tflite_tmp").rglob("*.tflite"))
         if candidates:
@@ -362,6 +429,7 @@ def evaluate_test(onnx_path: Path | None, dataset_root: Path) -> None:
     if onnx_path is None or not onnx_path.is_file():
         print("[eval] no ONNX model; skipping hue-bucketed test eval", flush=True)
         return
+    pip_best_effort(["onnxruntime"], description="onnxruntime for hue-bucketed eval")
     try:
         run([
             sys.executable, str(EVAL_SCRIPT),

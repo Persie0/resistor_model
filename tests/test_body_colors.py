@@ -176,3 +176,20 @@ def test_segmentation_colabs_reference_blue_release():
         text = (Path(__file__).resolve().parents[1] / "colab" / name).read_text(encoding="utf-8")
         assert "blue_resistors_sam3.zip" in text
         assert "merge" in text.lower()
+
+
+def test_pp_liteseg_colab_installs_paddle_from_official_index():
+    # Regression test: `pip install paddlepaddle-gpu` from default PyPI has no
+    # Python 3.13 wheel (exit 1 with -q hiding the reason). The GPU build must
+    # come from Paddle's official index, with the pip tail printed on failure.
+    import re
+
+    text = (Path(__file__).resolve().parents[1] / "colab" / "train_pp_liteseg_colab.py").read_text(encoding="utf-8")
+    assert "https://www.paddlepaddle.org.cn/packages/stable/cu126/" in text
+    assert "PADDLE_GPU_PIN" in text
+    # No bare PyPI paddle install left (only indexed attempts + error tail printer).
+    bare = [line for line in text.splitlines()
+            if "paddlepaddle-gpu" in line and "-i" not in line and "packages/stable" not in line
+            and line.strip().startswith(("+", "run(", '"', "'"))]
+    assert bare == []
+    assert "opencv" in text and "requirements" in text  # pinned cv2 (no 3.13 wheel) is filtered out
