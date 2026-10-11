@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v8-amp-fp16"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v9-loader-tuning"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -72,8 +72,14 @@ BATCH_SIZE = 48
 # Eval stays fp32. If loss ever goes NaN under AMP, drop this to fp32.
 PRECISION = "fp16"
 AMP_LEVEL = "O1"
-# Data loading was ~40% of batch_cost at bs48: 4 workers feeds the GPU.
-NUM_WORKERS = 4
+# Data loading was ~45% of batch_cost at bs48: 6 workers feed the GPU.
+NUM_WORKERS = 6
+# ResizeStepScaling up to 2.0x dominates CPU aug cost (upscale-then-crop per
+# sample). Our frames already vary in distance/size, so cap at 1.5x: keeps
+# scale invariance, cuts worst-case aug pixels ~2x. Transforms are runtime
+# config, safe to change across a resume.
+AUG_MIN_SCALE = 0.5
+AUG_MAX_SCALE = 1.5
 SAVE_INTERVAL = 1000
 # PaddleSeg only writes checkpoints locally; mirror them to Drive on this
 # cadence so a Colab disconnect loses minutes, not hours (like last.pt/best.pt
@@ -471,6 +477,15 @@ def find_base_config() -> Path:
     )
 
 
+def _cap_train_scale_aug(cfg: dict) -> None:
+    """Cap ResizeStepScaling range (pure-dict helper, unit-tested)."""
+    transforms = cfg.get("train_dataset", {}).get("transforms", [])
+    for tr in transforms:
+        if isinstance(tr, dict) and tr.get("type") == "ResizeStepScaling":
+            tr["min_scale_factor"] = AUG_MIN_SCALE
+            tr["max_scale_factor"] = AUG_MAX_SCALE
+
+
 def build_custom_config(dataset_root: Path) -> Path:
     import yaml
 
@@ -490,6 +505,7 @@ def build_custom_config(dataset_root: Path) -> Path:
     cfg["val_dataset"]["val_path"] = str(dataset_root / "valid.txt")
     cfg["batch_size"] = BATCH_SIZE
     cfg["iters"] = ITERS
+    _cap_train_scale_aug(cfg)
     CUSTOM_CONFIG.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     print(f"[config] {base.name} -> {CUSTOM_CONFIG} | iters={ITERS} batch={BATCH_SIZE}", flush=True)
     backbone_pretrained = cfg["model"].get("backbone", {}).get("pretrained")
@@ -535,6 +551,7 @@ def print_run_configuration(dataset_root: Path, resume: str | None) -> None:
     print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
     print(f"  iters: {ITERS} | batch size: {BATCH_SIZE} | eval+save every {SAVE_INTERVAL}", flush=True)
     print(f"  precision: {PRECISION} (AMP {AMP_LEVEL}) | workers: {NUM_WORKERS}", flush=True)
+    print(f"  aug scale range: {AUG_MIN_SCALE}-{AUG_MAX_SCALE} (capped for loader speed)", flush=True)
     print(f"  body-color synth (train only): {', '.join(SYNTH_VARIANTS)}", flush=True)
     print(f"  heartbeat: every {HEARTBEAT_SECONDS}s during silent training", flush=True)
     print(f"  drive checkpoint sync: every {CHECKPOINT_SYNC_SECONDS}s", flush=True)

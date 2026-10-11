@@ -106,6 +106,8 @@ def test_pp_liteseg_colab_targets_liteseg_512_and_synth_colors():
     assert colab.IMAGE_SIZE == 512
     assert colab.PRECISION == "fp16"  # compute-bound T4: AMP is the real speedup lever
     assert colab.BATCH_SIZE == 48
+    assert colab.NUM_WORKERS == 6
+    assert colab.AUG_MAX_SCALE == 1.5
     assert "blue" in colab.SYNTH_VARIANTS and "green" in colab.SYNTH_VARIANTS
     assert colab.RUN_DIR.name == "segmentation-pp-liteseg"
     assert "Ultralytics" not in Path(script).read_text(encoding="utf-8")
@@ -185,6 +187,24 @@ def test_pp_liteseg_colab_streams_progress_like_other_colabs():
     assert "def run_with_heartbeat" in text
     assert "def print_run_configuration" in text
     assert "run_with_heartbeat(command" in text
+
+
+def test_pp_liteseg_scale_cap_helper():
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    script = Path(__file__).resolve().parents[1] / "colab" / "train_pp_liteseg_colab.py"
+    spec = spec_from_file_location("train_pp_liteseg_colab_cap", script)
+    colab = module_from_spec(spec)
+    spec.loader.exec_module(colab)
+    cfg = {"train_dataset": {"transforms": [
+        {"type": "ResizeStepScaling", "min_scale_factor": 0.5, "max_scale_factor": 2.0},
+        {"type": "Normalize"},
+    ]}}
+    colab._cap_train_scale_aug(cfg)
+    assert cfg["train_dataset"]["transforms"][0]["max_scale_factor"] == 1.5
+    assert cfg["train_dataset"]["transforms"][0]["min_scale_factor"] == 0.5
+    assert cfg["train_dataset"]["transforms"][1] == {"type": "Normalize"}
+    colab._cap_train_scale_aug({})  # no train_dataset: no-op, no crash
 
 
 def test_pp_liteseg_colab_syncs_checkpoints_to_drive_periodically():
