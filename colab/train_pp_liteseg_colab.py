@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v10-streamed-pip"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v11-pip-timeout"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -276,13 +276,18 @@ def install_paddle() -> None:
     last_error: Exception | None = None
     print("[paddle] downloading the ~1 GB GPU wheel; this takes a few minutes, progress below", flush=True)
     for attempt in attempts:
+        started = time.monotonic()
         try:
             # No -q here and streamed (not captured): pip's download progress
             # bar is the only sign of life during this multi-minute step.
+            # Generous timeout/retries: the official index can be slow but
+            # alive; pip's defaults abort too eagerly on it.
             run_with_heartbeat(
-                [sys.executable, "-m", "pip", "install", *attempt],
-                heartbeat_seconds=60,
+                [sys.executable, "-m", "pip", "install",
+                 "--timeout", "120", "--retries", "10", *attempt],
+                heartbeat_seconds=120,
             )
+            print(f"[paddle] installed in {time.monotonic() - started:.0f}s", flush=True)
             break
         except subprocess.CalledProcessError as exc:
             last_error = exc
