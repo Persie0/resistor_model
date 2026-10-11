@@ -105,6 +105,19 @@ CUSTOM_CONFIG = WORK / "pp_liteseg_resistor_512.yml"
 DRIVE_MOUNT = Path("/content/drive")
 RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "segmentation-pp-liteseg"
 OUTPUT_DRIVE = RUN_DIR / "output"
+# Prepared training tree (v4 + blue merge + synth + 0/1 masks) persisted here,
+# so fresh sessions restore instead of re-downloading/re-encoding ~20k files.
+DRIVE_DATASET = RUN_DIR / "dataset"
+DRIVE_ARCHIVE_V4 = RUN_DIR / "archives" / "resistor_sam3_merged.zip"
+DRIVE_ARCHIVE_BLUE = RUN_DIR / "archives" / "blue_resistors_sam3.zip"
+DATASET_FINGERPRINT = {
+    "recipe": "segmentation-pp-liteseg-v1",
+    "v4_sha256": DATASET_SHA256,
+    "blue_sha256": BLUE_DATASET_SHA256,
+    "synth_variants": list(SYNTH_VARIANTS),
+    "synth_seed": SYNTH_SEED,
+    "masks01": 1,
+}
 ZIP_PATH = WORK / "resistor-segmentation-pp-liteseg.zip"
 
 
@@ -370,16 +383,10 @@ def download_with_progress(url: str, destination: Path, *, label: str) -> None:
 
 def download_dataset() -> Path:
     WORK.mkdir(parents=True, exist_ok=True)
-    if not (ARCHIVE.is_file() and archive_sha256(ARCHIVE) == DATASET_SHA256):
-        if ARCHIVE.is_file():
-            ARCHIVE.unlink()
-        download_with_progress(DATASET_URL, ARCHIVE, label="dataset")
-        if archive_sha256(ARCHIVE) != DATASET_SHA256:
-            ARCHIVE.unlink(missing_ok=True)
-            raise RuntimeError("v4 archive checksum mismatch")
-        print(f"[dataset] checksum OK | {ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
-    else:
-        print("[dataset] verified archive cached locally", flush=True)
+    dataset_cache.fetch_cached_archive(
+        local=ARCHIVE, drive_copy=DRIVE_ARCHIVE_V4,
+        url=DATASET_URL, sha256=DATASET_SHA256, label="dataset",
+    )
     root = find_dataset_root(DATASET_ROOT) if (DATASET_ROOT / "train").exists() else None
     if root is None:
         if DATASET_ROOT.exists():
@@ -392,21 +399,12 @@ def download_dataset() -> Path:
 
 
 def merge_blue_dataset(dataset_root: Path) -> None:
-    """Download (cached) and merge real blue-resistor pairs. Standalone script: stdlib+PIL only."""
+    """Merge real blue-resistor pairs (archives cached in Drive). Standalone script: stdlib+PIL only."""
     WORK.mkdir(parents=True, exist_ok=True)
-    if BLUE_ARCHIVE.is_file():
-        print("[blue] checking existing local archive...", flush=True)
-        if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
-            print("[blue] stale/incomplete archive; downloading again", flush=True)
-            BLUE_ARCHIVE.unlink()
-    if not BLUE_ARCHIVE.is_file():
-        download_with_progress(BLUE_DATASET_URL, BLUE_ARCHIVE, label="blue")
-        if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
-            BLUE_ARCHIVE.unlink(missing_ok=True)
-            raise RuntimeError("blue archive checksum mismatch")
-        print(f"[blue] checksum OK | {BLUE_ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
-    else:
-        print("[blue] verified archive cached locally", flush=True)
+    dataset_cache.fetch_cached_archive(
+        local=BLUE_ARCHIVE, drive_copy=DRIVE_ARCHIVE_BLUE,
+        url=BLUE_DATASET_URL, sha256=BLUE_DATASET_SHA256, label="blue",
+    )
     run([
         sys.executable, str(MERGE_SCRIPT),
         "--dataset-root", str(dataset_root),
@@ -550,12 +548,12 @@ def latest_resume_checkpoint() -> str | None:
     return best[1]
 
 
-def print_run_configuration(dataset_root: Path, resume: str | None) -> None:
+def print_run_configuration(dataset_root: Path, resume: str | None, dataset_source: str) -> None:
     print("\nPP-LiteSeg training configuration", flush=True)
     print("  model: PP-LiteSeg (STDC backbone from base config), binary background-vs-body", flush=True)
     print("  release: v4 / resistor_sam3_merged.zip + ee / blue_resistors_sam3.zip (blue_* stems)", flush=True)
     print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
-    print(f"  dataset: {dataset_root}", flush=True)
+    print(f"  dataset: {dataset_root} ({dataset_source})", flush=True)
     for split in ("train", "valid", "test"):
         pairs = len(list((dataset_root / split / "masks_semantic").glob("*.png")))
         print(f"  pairs {split}: {pairs}", flush=True)
@@ -604,7 +602,26 @@ def _start_drive_sync() -> threading.Event:
     return stop
 
 
-def train(config: Path) -> None:
+def prepare_dataset() -> tuple[Path, str]:
+    """Prepared tree from Drive cache when possible, else build + persist.
+
+    Returns (dataset_root, source) where source is 'Drive cache' or
+    'freshly built'. Any recipe change (archive SHAs, synth variants/seed)
+    alters the fingerprint and triggers a rebuild automatically.
+    """
+    if dataset_cache.prepared_usable(DRIVE_DATASET, DATASET_FINGERPRINT):
+        print("[dataset-cache] fingerprint matches; restoring prepared dataset from Drive...", flush=True)
+        dataset_cache.restore_prepared(DRIVE_DATASET, DATASET_ROOT)
+        return find_dataset_root(DATASET_ROOT), "Drive cache"
+    dataset_root = download_dataset()
+    merge_blue_dataset(dataset_root)
+    synthesize_body_colors(dataset_root)
+    normalize_masks_01(dataset_root)
+    dataset_cache.persist_prepared(DATASET_ROOT, DRIVE_DATASET, DATASET_FINGERPRINT)
+    return dataset_root, "freshly built"
+
+
+def train(config: Path, dataset_source: str) -> None:
     OUTPUT_LOCAL.mkdir(parents=True, exist_ok=True)
     if OUTPUT_DRIVE.is_dir():
         print("[resume] syncing Drive output dir locally...", flush=True)
@@ -627,7 +644,7 @@ def train(config: Path) -> None:
             resume = None
     if resume is not None:
         command.extend(["--resume_model", resume])
-    print_run_configuration(find_dataset_root(DATASET_ROOT), resume)
+    print_run_configuration(find_dataset_root(DATASET_ROOT), resume, dataset_source)
     stop_sync = _start_drive_sync()
     # tools/train.py does `from paddleseg...`: the script's own dir (tools/)
     # lands on sys.path, not the repo root, so point PYTHONPATH at PaddleSeg.
@@ -739,14 +756,14 @@ def main() -> None:
     require_gpu()
     mount_drive()
     clone_repos()
+    sys.path.insert(0, str(RESISTOR_REPO / "src"))
+    global dataset_cache
+    from resistor_model.tools import dataset_cache
     install_dependencies()
-    dataset_root = download_dataset()
-    merge_blue_dataset(dataset_root)
-    synthesize_body_colors(dataset_root)
-    normalize_masks_01(dataset_root)
+    dataset_root, dataset_source = prepare_dataset()
     write_paddleseg_lists(dataset_root)
     config = build_custom_config(dataset_root)
-    train(config)
+    train(config, dataset_source)
     onnx_path = export_and_convert()
     evaluate_test(onnx_path, dataset_root)
     summarize()

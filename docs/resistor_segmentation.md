@@ -114,6 +114,10 @@ resistor-synthesize-colors --dataset-root /path/to/resistor_sam3_merged --splits
 resistor-eval-color-buckets --dataset-root /path/to/resistor_sam3_merged --split test --onnx exports/model.onnx --image-size 512
 ```
 
+## Prepared dataset cache (Drive)
+
+Both segmentation Colabs persist the *prepared* training tree (v4 + blue merge + synth + 0/1 masks) under their Drive run dir (`dataset/`, with release archives under `archives/`). Fresh sessions restore it when the fingerprint (archive SHAs, synth variants/seed) matches, instead of re-downloading ~870 MiB and re-encoding ~20k files. Any recipe change rebuilds automatically. Console entry: `resistor-merge-extra-masks`.
+
 ## Licensing choice
 
 The architecture and implementation come from torchvision, which is BSD-3-Clause licensed. The default training path does **not** load torchvision's pretrained ImageNet weights. This is intentional: torchvision documents that pretrained models may have separate or dataset-derived terms that users must evaluate for their use case.

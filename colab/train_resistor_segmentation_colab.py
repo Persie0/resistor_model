@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.request
 
-SEGMENTATION_COLAB_VERSION = "2026-10-11-v7-blue-synth-stdout"
+SEGMENTATION_COLAB_VERSION = "2026-10-11-v8-drive-dataset-cache"
 MODEL_NAME = "lraspp_mobilenet_v3_large"
 DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/v4/resistor_sam3_merged.zip"
 DATASET_SHA256 = "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
@@ -58,6 +58,18 @@ DATASET_ROOT = WORK / "dataset"
 LOCAL_RESUME = WORK / "resume-last.pt"
 DRIVE_MOUNT = Path("/content/drive")
 RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "segmentation-v4-lraspp"
+# Prepared training tree (v4 + blue merge + synth) persisted here, so fresh
+# sessions restore instead of re-downloading/re-encoding thousands of files.
+DRIVE_DATASET = RUN_DIR / "dataset"
+DRIVE_ARCHIVE_V4 = RUN_DIR / "archives" / "resistor_sam3_merged.zip"
+DRIVE_ARCHIVE_BLUE = RUN_DIR / "archives" / "blue_resistors_sam3.zip"
+DATASET_FINGERPRINT = {
+    "recipe": "segmentation-lraspp-v1",
+    "v4_sha256": DATASET_SHA256,
+    "blue_sha256": BLUE_DATASET_SHA256,
+    "synth_variants": list(SYNTH_VARIANTS),
+    "synth_seed": SYNTH_SEED,
+}
 ONNX_PATH = RUN_DIR / "resistor_segmenter_lraspp.onnx"
 ZIP_PATH = WORK / "resistor-segmentation-v4-lraspp.zip"
 
@@ -248,47 +260,12 @@ def extracted_dataset_ready(root: Path) -> bool:
 
 def download_dataset() -> None:
     WORK.mkdir(parents=True, exist_ok=True)
-    # A Colab retry in the same runtime should NOT download 572 MiB again.
-    archive_verified = False
-    if ARCHIVE.is_file():
-        print("[dataset] checking existing local v4 archive...", flush=True)
-        archive_verified = archive_sha256(ARCHIVE) == DATASET_SHA256
-        if archive_verified:
-            print("[dataset] verified archive cached locally", flush=True)
-        else:
-            print("[dataset] stale/incomplete archive; downloading again", flush=True)
-            ARCHIVE.unlink()
-
-    if not archive_verified:
-        request = urllib.request.Request(DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
-        hasher = hashlib.sha256()
-        total_downloaded = 0
-        print("[dataset] downloading v4 SAM-mask dataset...", flush=True)
-        with urllib.request.urlopen(request) as response, ARCHIVE.open("wb") as destination:
-            total = int(response.headers.get("Content-Length") or 0)
-            last_report = 0
-            while True:
-                chunk = response.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                destination.write(chunk)
-                hasher.update(chunk)
-                total_downloaded += len(chunk)
-                if total_downloaded - last_report >= 32 * 1024 * 1024 or (total and total_downloaded >= total):
-                    progress = f" ({100 * total_downloaded / total:.0f}%)" if total else ""
-                    print(
-                        f"[dataset] downloaded {total_downloaded / 1024 / 1024:.1f} MiB{progress}",
-                        flush=True,
-                    )
-                    last_report = total_downloaded
-        actual_sha = hasher.hexdigest()
-        if actual_sha != DATASET_SHA256:
-            ARCHIVE.unlink(missing_ok=True)
-            raise RuntimeError(f"v4 archive checksum mismatch: expected {DATASET_SHA256}, got {actual_sha}")
-        print(
-            f"[dataset] checksum OK | {ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB",
-            flush=True,
-        )
+    # A Colab retry in the same runtime should NOT download 572 MiB again;
+    # across sessions the Drive backup is used instead of the release server.
+    dataset_cache.fetch_cached_archive(
+        local=ARCHIVE, drive_copy=DRIVE_ARCHIVE_V4,
+        url=DATASET_URL, sha256=DATASET_SHA256, label="dataset",
+    )
 
     if extracted_dataset_ready(DATASET_ROOT):
         print("[dataset] complete v4 extraction cached; skipping extraction", flush=True)
@@ -358,24 +335,14 @@ def stage_resume_checkpoint(source: Path | None, destination: Path = LOCAL_RESUM
 
 
 def merge_blue_dataset(dataset_root: Path) -> None:
-    """Download (cached, verified) and merge real blue-resistor pairs into the v4 tree."""
+    """Merge real blue-resistor pairs into the v4 tree (archives cached in Drive)."""
+    from resistor_model.tools import dataset_cache
+
     WORK.mkdir(parents=True, exist_ok=True)
-    if BLUE_ARCHIVE.is_file():
-        print("[blue] checking existing local archive...", flush=True)
-        if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
-            print("[blue] stale/incomplete archive; downloading again", flush=True)
-            BLUE_ARCHIVE.unlink()
-    if not BLUE_ARCHIVE.is_file():
-        print("[blue] downloading blue-resistor SAM dataset...", flush=True)
-        request = urllib.request.Request(BLUE_DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
-        with urllib.request.urlopen(request) as response, BLUE_ARCHIVE.open("wb") as destination:
-            shutil.copyfileobj(response, destination)
-        if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
-            BLUE_ARCHIVE.unlink(missing_ok=True)
-            raise RuntimeError("blue archive checksum mismatch")
-        print(f"[blue] checksum OK | {BLUE_ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
-    else:
-        print("[blue] verified archive cached locally", flush=True)
+    dataset_cache.fetch_cached_archive(
+        local=BLUE_ARCHIVE, drive_copy=DRIVE_ARCHIVE_BLUE,
+        url=BLUE_DATASET_URL, sha256=BLUE_DATASET_SHA256, label="blue",
+    )
     run([
         sys.executable, "-m", "resistor_model.tools.merge_extra_masks",
         "--dataset-root", str(dataset_root),
@@ -444,12 +411,13 @@ def print_run_configuration(
     dataset_root: Path,
     drive_resume: Path | None,
     local_resume: Path | None,
+    dataset_source: str,
 ) -> None:
     print("\nSegmentation training configuration", flush=True)
     print(f"  model: {MODEL_NAME}", flush=True)
-    print("  release: v4 / resistor_sam3_merged.zip", flush=True)
+    print("  release: v4 / resistor_sam3_merged.zip + ee / blue_resistors_sam3.zip (blue_* stems)", flush=True)
     print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
-    print(f"  dataset: {dataset_root}", flush=True)
+    print(f"  dataset: {dataset_root} ({dataset_source})", flush=True)
     print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
     print("  extra data: real blue bodies merged from blue_resistors_sam3.zip (blue_* stems)", flush=True)
     if SYNTH_VARIANTS:
@@ -469,11 +437,31 @@ def print_run_configuration(
     print("", flush=True)
 
 
-def train_and_export() -> None:
+def prepare_dataset() -> tuple[Path, str]:
+    """Prepared tree from Drive cache when possible, else build + persist.
+
+    Returns (dataset_root, source). Any recipe change (archive SHAs, synth
+    variants/seed) alters the fingerprint and triggers a rebuild automatically.
+    """
+    from resistor_model.tools import dataset_cache
+
+    if dataset_cache.prepared_usable(DRIVE_DATASET, DATASET_FINGERPRINT):
+        print("[dataset-cache] fingerprint matches; restoring prepared dataset from Drive...", flush=True)
+        dataset_cache.restore_prepared(DRIVE_DATASET, DATASET_ROOT)
+        return find_dataset_root(DATASET_ROOT), "Drive cache"
+    download_dataset()
+    dataset_root = find_dataset_root(DATASET_ROOT)
+    merge_blue_dataset(dataset_root)
+    synthesize_body_colors(dataset_root)
+    dataset_cache.persist_prepared(DATASET_ROOT, DRIVE_DATASET, DATASET_FINGERPRINT)
+    return dataset_root, "freshly built"
+
+
+def train_and_export(dataset_source: str) -> None:
     dataset_root = find_dataset_root(DATASET_ROOT)
     drive_resume = find_resume_checkpoint(RUN_DIR)
     local_resume = stage_resume_checkpoint(drive_resume)
-    print_run_configuration(dataset_root, drive_resume, local_resume)
+    print_run_configuration(dataset_root, drive_resume, local_resume, dataset_source)
     run_with_heartbeat(training_command(dataset_root, RUN_DIR, local_resume), cwd=REPO)
     try:
         run([
@@ -518,11 +506,8 @@ def main() -> None:
     mount_drive()
     clone_repo()
     install_dependencies()
-    download_dataset()
-    dataset_root = find_dataset_root(DATASET_ROOT)
-    merge_blue_dataset(dataset_root)
-    synthesize_body_colors(dataset_root)
-    train_and_export()
+    dataset_root, dataset_source = prepare_dataset()
+    train_and_export(dataset_source)
     package_and_download()
 
 

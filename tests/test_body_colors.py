@@ -248,6 +248,86 @@ def test_merge_and_synth_tools_accept_progress_every_flag():
         assert "--progress-every" in proc.stdout
 
 
+def test_dataset_cache_marker_roundtrip_and_rebuild_on_change(tmp_path: Path):
+    from resistor_model.tools import dataset_cache
+
+    drive, local = tmp_path / "drive", tmp_path / "local"
+    fp_v1 = {"recipe": "x", "v": 1}
+    assert not dataset_cache.prepared_usable(drive, fp_v1)
+    (local / "train").mkdir(parents=True)
+    (local / "train" / "a.txt").write_text("a", encoding="utf-8")
+    dataset_cache.persist_prepared(local, drive, fp_v1)
+    assert dataset_cache.prepared_usable(drive, fp_v1)
+    assert not dataset_cache.prepared_usable(drive, {"recipe": "x", "v": 2})
+    assert (drive / "train" / "a.txt").is_file()
+
+
+def test_dataset_cache_restore_replaces_local_and_requires_marker(tmp_path: Path):
+    import pytest
+
+    from resistor_model.tools import dataset_cache
+
+    drive, local = tmp_path / "drive", tmp_path / "local"
+    (drive / "dataset.ready.json").write_text("{}", encoding="utf-8")
+    (drive / "f.txt").write_text("f", encoding="utf-8")
+    (local / "stale.txt").write_text("stale", encoding="utf-8")
+    dataset_cache.restore_prepared(drive, local)
+    assert (local / "f.txt").is_file()
+    with pytest.raises(RuntimeError, match="no .*marker"):
+        dataset_cache.sync_tree(tmp_path, tmp_path / "out", label="t")
+
+
+def test_dataset_cache_fetch_prefers_caches_over_download(tmp_path: Path):
+    from resistor_model.tools import dataset_cache
+
+    local, drive_copy = tmp_path / "a.zip", tmp_path / "d" / "a.zip"
+    payload = b"archive-bytes"
+    local.write_bytes(payload)
+    drive_copy.parent.mkdir(parents=True)
+    drive_copy.write_bytes(payload)
+    calls: list[str] = []
+
+    def no_download(url: str, dest: Path, *, label: str) -> None:
+        calls.append(url)
+        raise AssertionError("must not download")
+
+    import resistor_model.tools.dataset_cache as dc
+
+    monkeypatch_download = dc.download_with_progress
+    dc.download_with_progress = no_download
+    try:
+        got = dataset_cache.fetch_cached_archive(
+            local=local, drive_copy=drive_copy, url="http://x", sha256=__import__("hashlib").sha256(payload).hexdigest(),
+            label="t",
+        )
+    finally:
+        dc.download_with_progress = monkeypatch_download
+    assert got == local and not calls
+    # Drive fallback when local is missing.
+    local.unlink()
+    dc.download_with_progress = no_download
+    try:
+        got = dataset_cache.fetch_cached_archive(
+            local=local, drive_copy=drive_copy, url="http://x", sha256=__import__("hashlib").sha256(payload).hexdigest(),
+            label="t",
+        )
+    finally:
+        dc.download_with_progress = monkeypatch_download
+    assert got == local and local.read_bytes() == payload and not calls
+
+
+def test_segmentation_colabs_persist_prepared_dataset_in_drive():
+    for name, recipe in (
+        ("train_pp_liteseg_colab.py", "segmentation-pp-liteseg-v1"),
+        ("train_resistor_segmentation_colab.py", "segmentation-lraspp-v1"),
+    ):
+        text = (Path(__file__).resolve().parents[1] / "colab" / name).read_text(encoding="utf-8")
+        assert "DATASET_FINGERPRINT" in text
+        assert recipe in text
+        assert "persist_prepared" in text
+        assert "prepared_usable" in text
+
+
 def test_merge_and_synth_tools_report_incremental_progress():
     import inspect
 
