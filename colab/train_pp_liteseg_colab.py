@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v5-drive-sync-progress"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v6-mask01-nocache"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -399,6 +399,30 @@ def synthesize_body_colors(dataset_root: Path) -> None:
     ])
 
 
+def normalize_masks_01(dataset_root: Path) -> None:
+    """Rewrite masks to 0/1 class indices in place (idempotent).
+
+    SAM PNGs use 0/255, but PaddleSeg reads labels as class indices where 255
+    means *ignore*: without this the foreground would train as background.
+    The PyTorch loader and all repo tools accept 0/1 masks unchanged.
+    """
+    import cv2
+
+    for split in ("train", "valid", "test"):
+        masks = sorted((dataset_root / split / "masks_semantic").glob("*.png"))
+        converted = 0
+        for done, path in enumerate(masks, start=1):
+            if done % 500 == 0 or done == len(masks):
+                print(f"[masks01] {split}: {done}/{len(masks)}...", flush=True)
+            arr = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if arr is None:
+                raise RuntimeError(f"unreadable mask: {path}")
+            if int(arr.max()) > 1:
+                cv2.imwrite(str(path), (arr > 0).astype("uint8"))
+                converted += 1
+        print(f"[masks01] {split}: {converted} rewritten to 0/1, {len(masks) - converted} already 0/1", flush=True)
+
+
 def write_paddleseg_lists(dataset_root: Path) -> None:
     """PaddleSeg Dataset lists: '<image> <mask>' paths relative to dataset root."""
     exts = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -451,7 +475,11 @@ def build_custom_config(dataset_root: Path) -> Path:
     cfg["iters"] = ITERS
     CUSTOM_CONFIG.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     print(f"[config] {base.name} -> {CUSTOM_CONFIG} | iters={ITERS} batch={BATCH_SIZE}", flush=True)
-    print(f"[config] transfer from stock pretrained: {cfg['model'].get('pretrained')}", flush=True)
+    backbone_pretrained = cfg["model"].get("backbone", {}).get("pretrained")
+    print(f"[config] transfer init: model.pretrained={cfg['model'].get('pretrained')} "
+          f"backbone.pretrained={backbone_pretrained}", flush=True)
+    if not cfg["model"].get("pretrained") and not backbone_pretrained:
+        print("[config] WARNING: no pretrained weights in base config; backbone trains from scratch", flush=True)
     return CUSTOM_CONFIG
 
 
@@ -664,6 +692,7 @@ def main() -> None:
     dataset_root = download_dataset()
     merge_blue_dataset(dataset_root)
     synthesize_body_colors(dataset_root)
+    normalize_masks_01(dataset_root)
     write_paddleseg_lists(dataset_root)
     config = build_custom_config(dataset_root)
     train(config)

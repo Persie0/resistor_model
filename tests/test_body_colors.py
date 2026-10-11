@@ -194,6 +194,14 @@ def test_pp_liteseg_colab_syncs_checkpoints_to_drive_periodically():
     assert "_start_drive_sync()" in text
 
 
+def test_pp_liteseg_colab_normalizes_masks_to_class_indices():
+    text = (Path(__file__).resolve().parents[1] / "colab" / "train_pp_liteseg_colab.py").read_text(encoding="utf-8")
+    # PaddleSeg reads labels as class indices (255 = ignore); 0/255 SAM masks
+    # would silently train the foreground as background.
+    assert "def normalize_masks_01" in text
+    assert "normalize_masks_01(dataset_root)" in text
+
+
 def test_merge_and_synth_tools_report_incremental_progress():
     import inspect
 
