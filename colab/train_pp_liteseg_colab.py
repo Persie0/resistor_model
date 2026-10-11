@@ -32,12 +32,16 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import json
+import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v3-paddle-index-fix"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v4-streamed-progress"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -59,6 +63,7 @@ IMAGE_SIZE = 512
 ITERS = 20000
 BATCH_SIZE = 16
 SAVE_INTERVAL = 1000
+HEARTBEAT_SECONDS = 30  # nudge printed when the trainer is silent this long
 NUM_CLASSES = 2  # background + resistor body
 # Train-only synthesis; valid/test stay real so metrics measure reality.
 SYNTH_VARIANTS = ("blue", "green", "random")
@@ -82,8 +87,109 @@ ZIP_PATH = WORK / "resistor-segmentation-pp-liteseg.zip"
 
 
 def run(cmd: list[str], *, cwd: Path | None = None) -> None:
+    """Run a short command, streaming its output line by line."""
     print("+", " ".join(map(str, cmd)), flush=True)
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="" if line.endswith("\n") else "\n", flush=True)
+    if process.wait():
+        raise subprocess.CalledProcessError(process.returncode, cmd)
+
+
+def run_with_heartbeat(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    heartbeat_seconds: float = HEARTBEAT_SECONDS,
+) -> None:
+    """Stream a long command (training); heartbeat while the child is silent.
+
+    A subprocess inheriting the kernel's native file descriptors can train for
+    hours while *none* of its prints reach the notebook cell. This forwards
+    every line through the parent Python process and prints a keep-alive plus
+    process health whenever the child goes quiet.
+    """
+    print("+", " ".join(map(str, cmd)), flush=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    assert process.stdout is not None
+
+    events: queue.Queue[str | None] = queue.Queue()
+
+    def pump_output() -> None:
+        try:
+            for line in process.stdout:
+                events.put(line)
+        finally:
+            events.put(None)
+
+    reader = threading.Thread(target=pump_output, name="pplite-trainer-log-forwarder", daemon=True)
+    reader.start()
+    started = time.monotonic()
+    heartbeat = max(0.1, float(heartbeat_seconds))
+    next_heartbeat = started + heartbeat
+    next_health = started + 300.0
+
+    try:
+        while True:
+            now = time.monotonic()
+            try:
+                item = events.get(timeout=max(0.01, min(0.25, next_heartbeat - now)))
+            except queue.Empty:
+                item = ""
+            if item is None:
+                break
+            if item:
+                print(item, end="" if item.endswith("\n") else "\n", flush=True)
+                next_heartbeat = time.monotonic() + heartbeat
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                print(
+                    f"[trainer] process pid={process.pid} alive | "
+                    f"no child output for {heartbeat:.0f}s | elapsed {now - started:.0f}s",
+                    flush=True,
+                )
+                next_heartbeat = now + heartbeat
+            if now >= next_health:
+                try:
+                    status = Path(f"/proc/{process.pid}/status").read_text(encoding="utf-8")
+                    selected = [
+                        line.strip() for line in status.splitlines()
+                        if line.startswith(("State:", "VmRSS:", "Threads:"))
+                    ]
+                    print(f"[trainer] process health: {' | '.join(selected)}", flush=True)
+                except OSError:
+                    pass
+                next_health = now + 300.0
+        if process.wait():
+            raise subprocess.CalledProcessError(process.returncode, cmd)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        process.stdout.close()
+        reader.join(timeout=1)
 
 
 def require_gpu() -> None:
@@ -351,6 +457,24 @@ def latest_resume_checkpoint() -> str | None:
     return best[1]
 
 
+def print_run_configuration(dataset_root: Path, resume: str | None) -> None:
+    print("\nPP-LiteSeg training configuration", flush=True)
+    print("  model: PP-LiteSeg-T (STDC1), binary background-vs-body", flush=True)
+    print("  release: v4 / resistor_sam3_merged.zip + ee / blue_resistors_sam3.zip (blue_* stems)", flush=True)
+    print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
+    print(f"  dataset: {dataset_root}", flush=True)
+    print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
+    print(f"  iters: {ITERS} | batch size: {BATCH_SIZE} | eval+save every {SAVE_INTERVAL}", flush=True)
+    print(f"  body-color synth (train only): {', '.join(SYNTH_VARIANTS)}", flush=True)
+    print(f"  heartbeat: every {HEARTBEAT_SECONDS}s during silent training", flush=True)
+    print(f"  persistent outputs: {RUN_DIR}", flush=True)
+    if resume is None:
+        print("  resume: no checkpoint found; starting fresh", flush=True)
+    else:
+        print(f"  resume: {resume}", flush=True)
+    print("", flush=True)
+
+
 def train(config: Path) -> None:
     OUTPUT_LOCAL.mkdir(parents=True, exist_ok=True)
     if OUTPUT_DRIVE.is_dir():
@@ -372,7 +496,8 @@ def train(config: Path) -> None:
             resume = None
     if resume is not None:
         command.extend(["--resume_model", resume])
-    run(command, cwd=PADDLESEG_DIR)
+    print_run_configuration(find_dataset_root(DATASET_ROOT), resume)
+    run_with_heartbeat(command, cwd=PADDLESEG_DIR)
     print("[train] syncing outputs to Drive...", flush=True)
     shutil.copytree(OUTPUT_LOCAL, OUTPUT_DRIVE, dirs_exist_ok=True)
 

@@ -178,6 +178,13 @@ def test_segmentation_colabs_reference_blue_release():
         assert "merge" in text.lower()
 
 
+def test_pp_liteseg_colab_streams_progress_like_other_colabs():
+    text = (Path(__file__).resolve().parents[1] / "colab" / "train_pp_liteseg_colab.py").read_text(encoding="utf-8")
+    assert "def run_with_heartbeat" in text
+    assert "def print_run_configuration" in text
+    assert "run_with_heartbeat(command" in text
+
+
 def test_pp_liteseg_colab_installs_paddle_from_official_index():
     # Regression test: `pip install paddlepaddle-gpu` from default PyPI has no
     # Python 3.13 wheel (exit 1 with -q hiding the reason). The GPU build must
