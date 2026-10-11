@@ -61,7 +61,11 @@ BLUE_DATASET_SHA256 = "800bd3aef16f1fbd2e98adbc2ba3c99551cbaf0f9b4c772614fa01909
 MODEL_TYPE_NEEDLE = "liteseg"  # parsed stock config must be a PP-LiteSeg model
 IMAGE_SIZE = 512
 ITERS = 20000
-BATCH_SIZE = 16
+# Sized for a 15 GB T4: activations scale ~linearly, bs16 ~= 3.4 GB reserved,
+# so bs48 lands ~9-10 GB with ~2.5x wall-clock speedup. If you ever hit OOM
+# (e.g. smaller GPU), drop to 32. LR stays at the stock 0.01: larger batches
+# at the same LR are safe (cleaner gradients); scaling LR up risks spikes.
+BATCH_SIZE = 48
 SAVE_INTERVAL = 1000
 # PaddleSeg only writes checkpoints locally; mirror them to Drive on this
 # cadence so a Colab disconnect loses minutes, not hours (like last.pt/best.pt
