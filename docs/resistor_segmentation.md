@@ -104,6 +104,7 @@ An adjacent `.onnx.json` file describes preprocessing, input/output names and th
 
 Segmentation is color-agnostic (body vs. background), so hue never changes the label. Three mechanisms combine:
 
+0. **Real blue bodies** (`ee/blue_resistors_sam3.zip`, 582 train / 73 valid / 72 test SAM pairs): both segmentation Colabs download, verify and merge them as `blue_*` into train/valid/test automatically — real blues in valid/test make the bucketed metrics honest.
 1. **Offline synthesis** (`resistor-synthesize-colors`): hue-rotates train bodies to blue/green/random (plus gray shape-only views) inside the exact SAM masks; masks are byte-identical, backgrounds untouched. Train split only; valid/test stay real.
 2. **Strong online jitter** (`--hue-jitter 0.12 --saturation-jitter 0.4 --gray-prob 0.10` defaults): label-preserving color noise every epoch.
 3. **Proof** (`resistor-eval-color-buckets --onnx model.onnx` or `--checkpoint best.pt`): reports IoU per body-color bucket (brown/green/blue/red/gray/...) on the test split, so a green-body blind spot can't hide behind a brown-dominated mean.

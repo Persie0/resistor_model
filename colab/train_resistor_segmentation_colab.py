@@ -22,10 +22,14 @@ import threading
 import time
 import urllib.request
 
-SEGMENTATION_COLAB_VERSION = "2026-10-09-v6-streamed-stdout"
+SEGMENTATION_COLAB_VERSION = "2026-10-11-v7-blue-synth-stdout"
 MODEL_NAME = "lraspp_mobilenet_v3_large"
 DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/v4/resistor_sam3_merged.zip"
 DATASET_SHA256 = "be3a1bb3b952f07556906decf6393fa7a8c228665867f721914a4e8e64376c6f"
+# Real blue-resistor bodies (SAM 3.1, same train/valid/test + masks_semantic layout).
+# Merged into the v4 tree (stems prefixed `blue_`) before synthesis/training.
+BLUE_DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/ee/blue_resistors_sam3.zip"
+BLUE_DATASET_SHA256 = "800bd3aef16f1fbd2e98adbc2ba3c99551cbaf0f9b4c772614fa01909ceb733e"
 IMAGE_SIZE = 384
 EPOCHS = 60
 BATCH_SIZE = 16
@@ -49,6 +53,7 @@ GRAY_PROB = 0.10
 WORK = Path("/content/resistor_segmentation")
 REPO = WORK / "resistor_model"
 ARCHIVE = WORK / "resistor_sam3_merged.zip"
+BLUE_ARCHIVE = WORK / "blue_resistors_sam3.zip"
 DATASET_ROOT = WORK / "dataset"
 LOCAL_RESUME = WORK / "resume-last.pt"
 DRIVE_MOUNT = Path("/content/drive")
@@ -352,6 +357,35 @@ def stage_resume_checkpoint(source: Path | None, destination: Path = LOCAL_RESUM
     return destination
 
 
+def merge_blue_dataset(dataset_root: Path) -> None:
+    """Download (cached, verified) and merge real blue-resistor pairs into the v4 tree."""
+    WORK.mkdir(parents=True, exist_ok=True)
+    if BLUE_ARCHIVE.is_file():
+        print("[blue] checking existing local archive...", flush=True)
+        if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
+            print("[blue] stale/incomplete archive; downloading again", flush=True)
+            BLUE_ARCHIVE.unlink()
+    if not BLUE_ARCHIVE.is_file():
+        print("[blue] downloading blue-resistor SAM dataset...", flush=True)
+        request = urllib.request.Request(BLUE_DATASET_URL, headers={"User-Agent": "resistor-model-colab"})
+        with urllib.request.urlopen(request) as response, BLUE_ARCHIVE.open("wb") as destination:
+            shutil.copyfileobj(response, destination)
+        if archive_sha256(BLUE_ARCHIVE) != BLUE_DATASET_SHA256:
+            BLUE_ARCHIVE.unlink(missing_ok=True)
+            raise RuntimeError("blue archive checksum mismatch")
+        print(f"[blue] checksum OK | {BLUE_ARCHIVE.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
+    else:
+        print("[blue] verified archive cached locally", flush=True)
+    run([
+        sys.executable, "-m", "resistor_model.tools.merge_extra_masks",
+        "--dataset-root", str(dataset_root),
+        "--extra-archive", str(BLUE_ARCHIVE),
+        "--extra-sha256", BLUE_DATASET_SHA256,
+        "--splits", "train", "valid", "test",
+        "--prefix", "blue",
+    ], cwd=REPO)
+
+
 def synthesize_body_colors(dataset_root: Path) -> None:
     """Recolor train bodies to blue/green/... in place (masks unchanged)."""
     if not SYNTH_VARIANTS:
@@ -416,6 +450,7 @@ def print_run_configuration(
     print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
     print(f"  dataset: {dataset_root}", flush=True)
     print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
+    print("  extra data: real blue bodies merged from blue_resistors_sam3.zip (blue_* stems)", flush=True)
     if SYNTH_VARIANTS:
         print(f"  body-color synth (train only): {', '.join(SYNTH_VARIANTS)}", flush=True)
     print(f"  color jitter: hue={HUE_JITTER} sat={SATURATION_JITTER} gray_p={GRAY_PROB}", flush=True)
@@ -483,7 +518,9 @@ def main() -> None:
     clone_repo()
     install_dependencies()
     download_dataset()
-    synthesize_body_colors(find_dataset_root(DATASET_ROOT))
+    dataset_root = find_dataset_root(DATASET_ROOT)
+    merge_blue_dataset(dataset_root)
+    synthesize_body_colors(dataset_root)
     train_and_export()
     package_and_download()
 

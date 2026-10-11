@@ -107,3 +107,72 @@ def test_pp_liteseg_colab_targets_liteseg_512_and_synth_colors():
     assert "blue" in colab.SYNTH_VARIANTS and "green" in colab.SYNTH_VARIANTS
     assert colab.RUN_DIR.name == "segmentation-pp-liteseg"
     assert "Ultralytics" not in Path(script).read_text(encoding="utf-8")
+
+
+def _make_merge_fixture(root: Path) -> tuple[Path, Path]:
+    import zipfile
+
+    v4 = root / "v4"
+    for split in ("train", "valid"):
+        (v4 / split / "images").mkdir(parents=True)
+        (v4 / split / "masks_semantic").mkdir()
+    Image.new("RGB", (24, 12), "white").save(v4 / "train" / "images" / "v.jpg")
+    Image.new("L", (24, 12), 0).save(v4 / "train" / "masks_semantic" / "v.png")
+
+    extra = root / "extra"
+    body = np.zeros((12, 24, 3), np.uint8)
+    body[:] = (200, 30, 30)  # blue-ish BGR body
+    ok, jpg = cv2.imencode(".jpg", body)
+    assert ok
+    mask = np.zeros((12, 24), np.uint8)
+    mask[2:10, 4:20] = 255
+    ok, png = cv2.imencode(".png", mask)
+    assert ok
+    archive = root / "blue.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("train/images/b.jpg", jpg.tobytes())
+        zf.writestr("train/masks_semantic/b.png", png.tobytes())
+        zf.writestr("train/images/lonely.jpg", jpg.tobytes())  # no mask -> ignored
+        zf.writestr("valid/images/b.jpg", jpg.tobytes())
+        zf.writestr("valid/masks_semantic/b.png", png.tobytes())
+    return v4, archive
+
+
+def test_merge_extra_masks_prefixes_and_preserves_pairs(tmp_path: Path):
+    import hashlib
+
+    from resistor_model.tools.merge_extra_masks import merge_archive
+
+    v4, archive = _make_merge_fixture(tmp_path)
+    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    report = merge_archive(v4, archive, splits=["train", "valid"], prefix="blue", expected_sha256=sha)
+    assert report["train"]["copied"] == 1
+    assert report["valid"]["copied"] == 1
+    img = v4 / "train" / "images" / "blue_b.jpg"
+    mask = v4 / "train" / "masks_semantic" / "blue_b.png"
+    assert img.is_file() and mask.is_file()
+    with Image.open(mask) as m:
+        assert m.size == (24, 12)
+        assert np.asarray(m).sum() > 0
+    # Original v4 pair untouched, idempotent rerun.
+    assert (v4 / "train" / "images" / "v.jpg").is_file()
+    rerun = merge_archive(v4, archive, splits=["train", "valid"], prefix="blue", expected_sha256=sha)
+    assert rerun["train"]["copied"] == 0
+    assert rerun["train"]["skipped_existing"] == 1
+
+
+def test_merge_extra_masks_rejects_bad_checksum(tmp_path: Path):
+    import pytest
+
+    from resistor_model.tools.merge_extra_masks import merge_archive
+
+    v4, archive = _make_merge_fixture(tmp_path)
+    with pytest.raises(RuntimeError, match="checksum"):
+        merge_archive(v4, archive, splits=["train"], prefix="blue", expected_sha256="0" * 64)
+
+
+def test_segmentation_colabs_reference_blue_release():
+    for name in ("train_resistor_segmentation_colab.py", "train_pp_liteseg_colab.py"):
+        text = (Path(__file__).resolve().parents[1] / "colab" / name).read_text(encoding="utf-8")
+        assert "blue_resistors_sam3.zip" in text
+        assert "merge" in text.lower()
