@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v7-pythonpath-progress"
+PADDLESEG_COLAB_VERSION = "2026-10-11-v8-amp-fp16"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -60,12 +60,20 @@ BLUE_DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/
 BLUE_DATASET_SHA256 = "800bd3aef16f1fbd2e98adbc2ba3c99551cbaf0f9b4c772614fa01909ceb733e"
 MODEL_TYPE_NEEDLE = "liteseg"  # parsed stock config must be a PP-LiteSeg model
 IMAGE_SIZE = 512
-ITERS = 20000
+# ~30 epochs at bs48 (19352 train pairs -> ~403 iters/epoch). bs16 needed 20k
+# iters for ~16 epochs; keeping 20k at bs48 would train ~50 epochs (~11h).
+ITERS = 12000
 # Sized for a 15 GB T4: activations scale ~linearly, bs16 ~= 3.4 GB reserved,
-# so bs48 lands ~9-10 GB with ~2.5x wall-clock speedup. If you ever hit OOM
+# so bs48 lands ~9-10 GB fp32 (~6-7 GB with AMP below). If you ever hit OOM
 # (e.g. smaller GPU), drop to 32. LR stays at the stock 0.01: larger batches
 # at the same LR are safe (cleaner gradients); scaling LR up risks spikes.
 BATCH_SIZE = 48
+# PaddleSeg AMP (fp16/O1): the actual speedup on a compute-bound T4 (~1.5x).
+# Eval stays fp32. If loss ever goes NaN under AMP, drop this to fp32.
+PRECISION = "fp16"
+AMP_LEVEL = "O1"
+# Data loading was ~40% of batch_cost at bs48: 4 workers feeds the GPU.
+NUM_WORKERS = 4
 SAVE_INTERVAL = 1000
 # PaddleSeg only writes checkpoints locally; mirror them to Drive on this
 # cadence so a Colab disconnect loses minutes, not hours (like last.pt/best.pt
@@ -526,6 +534,7 @@ def print_run_configuration(dataset_root: Path, resume: str | None) -> None:
         print(f"  pairs {split}: {pairs}", flush=True)
     print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
     print(f"  iters: {ITERS} | batch size: {BATCH_SIZE} | eval+save every {SAVE_INTERVAL}", flush=True)
+    print(f"  precision: {PRECISION} (AMP {AMP_LEVEL}) | workers: {NUM_WORKERS}", flush=True)
     print(f"  body-color synth (train only): {', '.join(SYNTH_VARIANTS)}", flush=True)
     print(f"  heartbeat: every {HEARTBEAT_SECONDS}s during silent training", flush=True)
     print(f"  drive checkpoint sync: every {CHECKPOINT_SYNC_SECONDS}s", flush=True)
@@ -578,7 +587,9 @@ def train(config: Path) -> None:
         "--do_eval",
         "--save_interval", str(SAVE_INTERVAL),
         "--save_dir", str(OUTPUT_LOCAL),
-        "--num_workers", "2",
+        "--num_workers", str(NUM_WORKERS),
+        "--precision", PRECISION,
+        "--amp_level", AMP_LEVEL,
     ]
     resume = latest_resume_checkpoint()
     # latest_resume_checkpoint may live under OUTPUT_DRIVE; it was just synced.

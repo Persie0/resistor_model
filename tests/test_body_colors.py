@@ -104,6 +104,8 @@ def test_pp_liteseg_colab_targets_liteseg_512_and_synth_colors():
     spec.loader.exec_module(colab)
     assert colab.MODEL_TYPE_NEEDLE == "liteseg"
     assert colab.IMAGE_SIZE == 512
+    assert colab.PRECISION == "fp16"  # compute-bound T4: AMP is the real speedup lever
+    assert colab.BATCH_SIZE == 48
     assert "blue" in colab.SYNTH_VARIANTS and "green" in colab.SYNTH_VARIANTS
     assert colab.RUN_DIR.name == "segmentation-pp-liteseg"
     assert "Ultralytics" not in Path(script).read_text(encoding="utf-8")
