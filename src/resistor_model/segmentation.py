@@ -94,6 +94,13 @@ class CocoResistorSegmentationDataset(Dataset):
         image_size: int = 384,
         augment: bool = False,
         category_names: Iterable[str] | None = None,
+        # Segmentation is color-agnostic (body vs. background), so unlike band
+        # classification hue is label-preserving here. Strong color jitter
+        # breaks the "brown blob = resistor" shortcut and is what makes blue /
+        # green / any-color bodies detectable without many real samples.
+        hue_jitter: float = 0.12,
+        saturation_jitter: float = 0.4,
+        gray_prob: float = 0.10,
     ) -> None:
         self.root = Path(root)
         self.split_dir = _find_split_dir(self.root, split)
@@ -125,7 +132,8 @@ class CocoResistorSegmentationDataset(Dataset):
             self.category_ids = {1}
             self.image_size = int(image_size)
             self.augment = bool(augment)
-            self.color_jitter = ColorJitter(brightness=0.25, contrast=0.25, saturation=0.15, hue=0.03)
+            self.gray_prob = float(gray_prob)
+            self.color_jitter = ColorJitter(brightness=0.25, contrast=0.25, saturation=float(saturation_jitter), hue=float(hue_jitter))
             return
 
         payload = json.loads((self.split_dir / "_annotations.coco.json").read_text(encoding="utf-8"))
@@ -159,7 +167,8 @@ class CocoResistorSegmentationDataset(Dataset):
             raise ValueError(f"No readable images found in {self.split_dir}")
         self.image_size = int(image_size)
         self.augment = bool(augment)
-        self.color_jitter = ColorJitter(brightness=0.25, contrast=0.25, saturation=0.15, hue=0.03)
+        self.gray_prob = float(gray_prob)
+        self.color_jitter = ColorJitter(brightness=0.25, contrast=0.25, saturation=float(saturation_jitter), hue=float(hue_jitter))
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -195,6 +204,9 @@ class CocoResistorSegmentationDataset(Dataset):
                 image = TF.rotate(image, angle, interpolation=TF.InterpolationMode.BILINEAR)
                 mask = TF.rotate(mask, angle, interpolation=TF.InterpolationMode.NEAREST)
             image = self.color_jitter(image)
+            if random.random() < self.gray_prob:
+                # Shape-only view: same mask, no color cue at all.
+                image = TF.rgb_to_grayscale(image, num_output_channels=3)
 
         image_tensor = TF.to_tensor(image)
         image_tensor = TF.normalize(image_tensor, IMAGENET_MEAN, IMAGENET_STD)

@@ -201,6 +201,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         image_size=args.image_size,
         augment=True,
         category_names=args.category,
+        hue_jitter=args.hue_jitter,
+        saturation_jitter=args.saturation_jitter,
+        gray_prob=args.gray_prob,
     )
     print(f"[startup] training dataset ready ({len(train_dataset)} images)", flush=True)
     print("[startup] indexing validation images and SAM masks...", flush=True)
@@ -461,6 +464,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--foreground-weight", type=float, default=2.0)
+    parser.add_argument("--hue-jitter", type=float, default=0.12,
+                        help="HSV hue jitter for train aug; label-preserving for body-vs-background, "
+                             "breaks the brown-body shortcut so blue/green bodies are found")
+    parser.add_argument("--saturation-jitter", type=float, default=0.4)
+    parser.add_argument("--gray-prob", type=float, default=0.10,
+                        help="Probability of a shape-only grayscale train view")
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(

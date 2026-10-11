@@ -11,7 +11,7 @@ resistor-body-only crop that is perfectly horizontal but of unknown direction
 ``ResistorBandNetMobile1D`` (``architecture: mobile1d``), a TFLite-safe 1D
 reader, instead of the heavier V2 transformer:
 
-* input 64x384 (was 128x768), dense bins 192 (was 256),
+* input 176x512 (HxW, >=2.5x the ~193x63 body crop per side, 90,112 px), dense bins 256,
 * single depthwise-separable CNN trunk with early height collapse,
 * cheap 2-channel log-ratio chroma prepend instead of a 2nd encoder,
 * 1D depthwise TCN instead of multi-head self-attention,
@@ -43,9 +43,14 @@ import urllib.request
 
 EPOCHS = 60
 BATCH_SIZE = 32
-OUTPUT_HEIGHT = 64
-OUTPUT_WIDTH = 384
-SEQUENCE_BINS = 192
+# Segmented body crops are ~193x63 (WxH). Requirement: input at least 2.5x per
+# side -> W >= 483, H >= 158, with W*H in (85k, 100k). Use 176x512 (HxW):
+# 2.79x height, 2.65x width, 176*512 = 90,112 px.
+# Trunk downsamples W by 2, so SEQUENCE_BINS = 512 // 2 = 256 matches exactly
+# (no interpolate at runtime).
+OUTPUT_HEIGHT = 176
+OUTPUT_WIDTH = 512
+SEQUENCE_BINS = 256
 BASE_CHANNELS = 24
 D_MODEL = 128
 TCN_LAYERS = 3
@@ -305,7 +310,7 @@ def write_config() -> Path | None:
 
 
 def benchmark_student() -> dict:
-    """Report params + CPU/GPU latency of the trained student at 64x384."""
+    """Report params + CPU/GPU latency of the trained student at 176x512."""
     import torch
 
     from resistor_model.runtime import build_model
@@ -326,7 +331,7 @@ def benchmark_student() -> dict:
         cpu_ms = (time.perf_counter() - t0) / iters * 1000.0
     report: dict = {
         "params_m": round(params / 1e6, 3),
-        "cpu_ms_per_image_64x384": round(cpu_ms, 2),
+        "cpu_ms_per_image": round(cpu_ms, 2),
         "input": [OUTPUT_HEIGHT, OUTPUT_WIDTH],
     }
     if torch.cuda.is_available():
@@ -340,7 +345,7 @@ def benchmark_student() -> dict:
             for _ in range(100):
                 model(gpu_dummy)
             torch.cuda.synchronize()
-            report["gpu_ms_per_image_64x384"] = round((time.perf_counter() - t0) / 100 * 1000.0, 2)
+            report["gpu_ms_per_image"] = round((time.perf_counter() - t0) / 100 * 1000.0, 2)
     (RUN_DIR / "mobile_benchmark.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print("Mobile benchmark: " + json.dumps(report), flush=True)
     return report

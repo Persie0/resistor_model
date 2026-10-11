@@ -175,7 +175,7 @@ class ResistorBandNetMobile1D(nn.Module):
         *,
         num_colors: int = 12,
         max_bands: int = 6,
-        sequence_bins: int = 192,
+        sequence_bins: int = 256,
         backbone: str = "mobile1d",
         pretrained: bool = False,  # accepted for config compat; trunk trains from scratch
         base_channels: int = 24,
@@ -208,7 +208,7 @@ class ResistorBandNetMobile1D(nn.Module):
             nn.Hardswish(inplace=True),
         )
         # H: 1/2 -> 1/4 -> 1/8 -> 1/16 ; W: 1/2 -> 1/2 -> 1/2 -> 1/2
-        # e.g. 64x384 -> 32x192 -> 16x192 -> 8x192 -> 4x192
+        # e.g. 176x512 -> 88x256 -> 44x256 -> 22x256 -> 11x256 (H pooled to 1)
         self.stage1 = InvertedResidual2D(base, c1, stride=(2, 1))
         self.stage2 = InvertedResidual2D(c1, c2, stride=(2, 1))
         self.stage3 = InvertedResidual2D(c2, c3, stride=(2, 1))

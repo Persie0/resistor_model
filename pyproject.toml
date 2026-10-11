@@ -40,6 +40,8 @@ resistor-split = "resistor_model.tools.make_splits:main"
 resistor-convert-yolo = "resistor_model.tools.convert_yolo:main"
 resistor-import-roboflow = "resistor_model.tools.import_roboflow_yolo:main"
 resistor-import-coco = "resistor_model.tools.import_roboflow_coco:main"
+resistor-synthesize-colors = "resistor_model.tools.synthesize_body_colors:main"
+resistor-eval-color-buckets = "resistor_model.tools.eval_color_buckets:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

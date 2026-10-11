@@ -96,6 +96,23 @@ resistor-export-segmentation \
 
 An adjacent `.onnx.json` file describes preprocessing, input/output names and the default `0.5` mask threshold.
 
+## PP-LiteSeg-T path (best quality at the same speed, Apache-2.0)
+
+`colab/train_pp_liteseg_colab.ipynb` trains **PP-LiteSeg-T (STDC1)** from PaddleSeg (Apache-2.0) at 512px, transfer-learning from the stock PP-LiteSeg pretrained weights. No Ultralytics code, models or weights anywhere in this path. Outputs (PaddleSeg `output/`, inference model, ONNX, best-effort TFLite, hue-bucketed test report) persist in `MyDrive/resistor_model/segmentation-pp-liteseg`; `iter_*` checkpoints resume automatically.
+
+## Detecting ANY body color (brown, blue, green, gray)
+
+Segmentation is color-agnostic (body vs. background), so hue never changes the label. Three mechanisms combine:
+
+1. **Offline synthesis** (`resistor-synthesize-colors`): hue-rotates train bodies to blue/green/random (plus gray shape-only views) inside the exact SAM masks; masks are byte-identical, backgrounds untouched. Train split only; valid/test stay real.
+2. **Strong online jitter** (`--hue-jitter 0.12 --saturation-jitter 0.4 --gray-prob 0.10` defaults): label-preserving color noise every epoch.
+3. **Proof** (`resistor-eval-color-buckets --onnx model.onnx` or `--checkpoint best.pt`): reports IoU per body-color bucket (brown/green/blue/red/gray/...) on the test split, so a green-body blind spot can't hide behind a brown-dominated mean.
+
+```bash
+resistor-synthesize-colors --dataset-root /path/to/resistor_sam3_merged --splits train --variants blue green
+resistor-eval-color-buckets --dataset-root /path/to/resistor_sam3_merged --split test --onnx exports/model.onnx --image-size 512
+```
+
 ## Licensing choice
 
 The architecture and implementation come from torchvision, which is BSD-3-Clause licensed. The default training path does **not** load torchvision's pretrained ImageNet weights. This is intentional: torchvision documents that pretrained models may have separate or dataset-derived terms that users must evaluate for their use case.

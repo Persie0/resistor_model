@@ -4,9 +4,9 @@ data:
   manifest: data/rres-v4/manifest.jsonl
   image_root: data/rres-v4
   splits_file: data/rres-v4/splits.json
-  # Body-only horizontal crops need far less resolution than full-scene V2.
-  output_size: [64, 384]
-  sequence_bins: 192
+  # Segmented body crops are ~193x63 (WxH); input is >=2.5x per side.
+  output_size: [176, 512]
+  sequence_bins: 256
   group_session: true
   split_ratios: [0.70, 0.15, 0.15]
   num_workers: 4

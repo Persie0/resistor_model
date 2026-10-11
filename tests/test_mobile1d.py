@@ -33,6 +33,23 @@ def test_mobile1d_output_contract_at_64x384():
     assert torch.all((out["slot_center"] >= 0) & (out["slot_center"] <= 1))
 
 
+def test_mobile1d_output_contract_at_176x512():
+    # Production size: >=2.5x the ~193x63 body crop per side, W*H = 90,112 in
+    # (85k, 100k); W stride is 2 so 512 wide maps exactly onto 256 dense bins
+    # with no interpolate fallback.
+    model = ResistorBandNetMobile1D(
+        num_colors=12, max_bands=6, sequence_bins=256,
+        base_channels=24, d_model=128, transformer_layers=3,
+        transformer_heads=4, slot_decoder_layers=2,
+    )
+    out = model(torch.rand(1, 3, 176, 512))
+    assert out["dense_logits"].shape == (1, 13, 256)
+    assert out["slot_exist_logits"].shape == (1, 6)
+    assert out["slot_color_logits"].shape == (1, 6, 12)
+    assert out["count_logits"].shape == (1, 7)
+    assert out["embedding"].shape == (1, 128)
+
+
 def test_mobile1d_is_tflite_safe_no_heavy_ops():
     model = ResistorBandNetMobile1D()
     banned = (nn.MultiheadAttention, nn.TransformerDecoder, nn.TransformerEncoder,
@@ -81,8 +98,8 @@ def test_mobile1d_colab_uses_same_three_assets():
 def test_mobile1d_colab_config(tmp_path: Path):
     cfg = colab.build_config(tmp_path / "run", None, None)
     assert cfg["model"]["architecture"] == "mobile1d"
-    assert cfg["data"]["output_size"] == [64, 384]
-    assert cfg["data"]["sequence_bins"] == 192
+    assert cfg["data"]["output_size"] == [176, 512]
+    assert cfg["data"]["sequence_bins"] == 256
     assert cfg["data"]["geometric_augment"] is True
     assert cfg["data"]["hflip_prob"] == 0.5
     assert cfg["loss"]["ctc"] > 0

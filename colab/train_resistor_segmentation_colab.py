@@ -35,6 +35,16 @@ HEARTBEAT_SECONDS = 5
 USE_PRETRAINED_BACKBONE = False
 # v4 contains one SAM 3.1 axial-resistor body foreground class.
 FOREGROUND_CATEGORIES = ("resistor",)
+# Offline body-color synthesis (blue/green bodies from exact SAM masks) so the
+# segmenter detects ANY body color, not just the dominant brown. Runs on the
+# train split only; valid/test stay real. Set to () to disable.
+SYNTH_VARIANTS = ("blue", "green")
+SYNTH_SEED = 7
+# Strong color jitter is label-preserving for body-vs-background and breaks the
+# "brown blob = resistor" shortcut (see train_segmentation --hue-jitter).
+HUE_JITTER = 0.12
+SATURATION_JITTER = 0.4
+GRAY_PROB = 0.10
 
 WORK = Path("/content/resistor_segmentation")
 REPO = WORK / "resistor_model"
@@ -221,8 +231,9 @@ def extracted_dataset_ready(root: Path) -> bool:
                 expected <= 0
                 or not images.is_dir()
                 or not masks.is_dir()
-                or sum(p.is_file() for p in images.iterdir()) != expected
-                or sum(p.is_file() for p in masks.glob("*.png")) != expected
+                # ">=" : offline body-color synthesis may add pairs in place.
+                or sum(p.is_file() for p in images.iterdir()) < expected
+                or sum(p.is_file() for p in masks.glob("*.png")) < expected
             ):
                 return False
         return True
@@ -341,6 +352,21 @@ def stage_resume_checkpoint(source: Path | None, destination: Path = LOCAL_RESUM
     return destination
 
 
+def synthesize_body_colors(dataset_root: Path) -> None:
+    """Recolor train bodies to blue/green/... in place (masks unchanged)."""
+    if not SYNTH_VARIANTS:
+        print("[synth] disabled; training on real bodies only", flush=True)
+        return
+    command = [
+        sys.executable, "-m", "resistor_model.tools.synthesize_body_colors",
+        "--dataset-root", str(dataset_root),
+        "--splits", "train",
+        "--variants", *SYNTH_VARIANTS,
+        "--seed", str(SYNTH_SEED),
+    ]
+    run(command, cwd=REPO)
+
+
 def training_command(dataset_root: Path, run_dir: Path, resume: Path | None) -> list[str]:
     command = [
         sys.executable,
@@ -359,6 +385,12 @@ def training_command(dataset_root: Path, run_dir: Path, resume: Path | None) -> 
         str(BATCH_SIZE),
         "--num-workers",
         "2",
+        "--hue-jitter",
+        str(HUE_JITTER),
+        "--saturation-jitter",
+        str(SATURATION_JITTER),
+        "--gray-prob",
+        str(GRAY_PROB),
         "--progress-every",
         str(PROGRESS_EVERY),
         "--checkpoint-every",
@@ -384,6 +416,9 @@ def print_run_configuration(
     print("  mask source: train/valid/test/masks_semantic/*.png", flush=True)
     print(f"  dataset: {dataset_root}", flush=True)
     print(f"  input: {IMAGE_SIZE}x{IMAGE_SIZE}", flush=True)
+    if SYNTH_VARIANTS:
+        print(f"  body-color synth (train only): {', '.join(SYNTH_VARIANTS)}", flush=True)
+    print(f"  color jitter: hue={HUE_JITTER} sat={SATURATION_JITTER} gray_p={GRAY_PROB}", flush=True)
     print(f"  epochs: {EPOCHS}", flush=True)
     print(f"  batch size: {BATCH_SIZE}", flush=True)
     print(f"  progress: every {PROGRESS_EVERY} batch", flush=True)
@@ -448,6 +483,7 @@ def main() -> None:
     clone_repo()
     install_dependencies()
     download_dataset()
+    synthesize_body_colors(find_dataset_root(DATASET_ROOT))
     train_and_export()
     package_and_download()
 
