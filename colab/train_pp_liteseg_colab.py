@@ -625,6 +625,10 @@ def prepare_dataset() -> tuple[Path, str]:
         print("[dataset-cache] old directory-format cache detected. Migrating by "
               "rebuilding locally from cached source archives instead of slowly "
               "copying thousands of files from Drive.", flush=True)
+    # A previous interrupted directory rsync may have copied the marker before
+    # all images. Never treat that partial local tree as a prepared dataset.
+    if DATASET_ROOT.exists():
+        shutil.rmtree(DATASET_ROOT)
     dataset_root = download_dataset()
     merge_blue_dataset(dataset_root)
     synthesize_body_colors(dataset_root)
