@@ -39,8 +39,9 @@ def test_roundtrip_and_one_archive(tmp_path):
     cache.persist_prepared_archive(local, archive, manifest, fp)
     assert cache.prepared_usable_archive(archive, manifest, fp)
     assert not cache.prepared_usable_archive(archive, manifest, {**fp, "variant": 2})
+    cache_archive = archive.with_name(json.loads(manifest.read_text())["archive_name"])
     assert {p.name for p in archive.parent.iterdir()} == {
-        "prepared_dataset.zip", "prepared_dataset.manifest.json",
+        cache_archive.name, "prepared_dataset.manifest.json",
     }
     restored = tmp_path / "restored"
     restored.mkdir()
@@ -55,7 +56,8 @@ def test_roundtrip_and_one_archive(tmp_path):
 def test_corrupt_archive_rejected_without_deleting_local(tmp_path):
     local, archive, manifest, fp = _fixture(tmp_path)
     cache.persist_prepared_archive(local, archive, manifest, fp)
-    with archive.open("r+b") as handle:
+    cache_archive = archive.with_name(json.loads(manifest.read_text())["archive_name"])
+    with cache_archive.open("r+b") as handle:
         handle.seek(120)
         handle.write(b"corrupt!")
     assert cache.prepared_usable_archive(archive, manifest, fp)  # metadata is still valid
@@ -78,11 +80,12 @@ def test_partial_manifest_is_cache_miss(tmp_path):
 def test_unsafe_zip_entry_rejected(tmp_path):
     local, archive, manifest, fp = _fixture(tmp_path)
     cache.persist_prepared_archive(local, archive, manifest, fp)
-    with zipfile.ZipFile(archive, "a") as z:
+    cache_archive = archive.with_name(json.loads(manifest.read_text())["archive_name"])
+    with zipfile.ZipFile(cache_archive, "a") as z:
         z.writestr("../escape.txt", "evil")
     metadata = json.loads(manifest.read_text())
-    metadata["size_bytes"] = archive.stat().st_size
-    metadata["sha256"] = cache._copy_progress(archive, tmp_path / "copy.zip", label="test")
+    metadata["size_bytes"] = cache_archive.stat().st_size
+    metadata["sha256"] = cache._copy_progress(cache_archive, tmp_path / "copy.zip", label="test")
     metadata["file_count"] += 1
     metadata["uncompressed_bytes"] += 4
     manifest.write_text(json.dumps(metadata))
@@ -93,7 +96,9 @@ def test_unsafe_zip_entry_rejected(tmp_path):
 def test_interrupted_upload_preserves_previous_cache(tmp_path, monkeypatch):
     local, archive, manifest, fp = _fixture(tmp_path)
     cache.persist_prepared_archive(local, archive, manifest, fp)
-    old_manifest, old_archive = manifest.read_bytes(), archive.read_bytes()
+    old_manifest = manifest.read_bytes()
+    cache_archive = archive.with_name(json.loads(old_manifest)["archive_name"])
+    old_archive = cache_archive.read_bytes()
 
     def fail_upload(src, dest, *, label, expected_sha=None):
         dest.write_bytes(b"partial")
@@ -103,7 +108,32 @@ def test_interrupted_upload_preserves_previous_cache(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="simulated"):
         cache.persist_prepared_archive(local, archive, manifest, {**fp, "variant": 2})
     assert manifest.read_bytes() == old_manifest
-    assert archive.read_bytes() == old_archive
+    assert cache_archive.read_bytes() == old_archive
+    assert not list(archive.parent.glob("*.partial"))
+
+
+def test_failed_manifest_publish_preserves_previous_cache(tmp_path, monkeypatch):
+    local, archive, manifest, fp = _fixture(tmp_path)
+    cache.persist_prepared_archive(local, archive, manifest, fp)
+    previous_manifest = manifest.read_bytes()
+    old = archive.with_name(json.loads(previous_manifest)["archive_name"])
+    old_payload = old.read_bytes()
+
+    original_replace = cache.os.replace
+
+    def fail_manifest(src, dest):
+        if Path(dest) == manifest:
+            raise OSError("simulated interrupted manifest publish")
+        return original_replace(src, dest)
+
+    monkeypatch.setattr(cache.os, "replace", fail_manifest)
+    with pytest.raises(OSError, match="interrupted manifest"):
+        cache.persist_prepared_archive(local, archive, manifest, {**fp, "variant": 2})
+    monkeypatch.setattr(cache.os, "replace", original_replace)
+    assert manifest.read_bytes() == previous_manifest
+    assert old.read_bytes() == old_payload
+    assert cache.prepared_usable_archive(archive, manifest, fp)
+    assert cache.restore_prepared_archive(archive, manifest, tmp_path / "restored", fp)
     assert not list(archive.parent.glob("*.partial"))
 
 
