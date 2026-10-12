@@ -142,8 +142,17 @@ def persist_prepared_archive(local_root: Path, archive: Path, manifest: Path, fi
             tmp_manifest.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp_manifest, manifest)
         except BaseException:
-            # The previous manifest still points to its own intact archive.
-            next_archive.unlink(missing_ok=True)
+            # A signal could arrive immediately after the manifest rename.
+            # Only delete the new ZIP if the manifest demonstrably still
+            # points elsewhere; otherwise preserve it rather than risk
+            # invalidating the newly published cache.
+            try:
+                current = _referenced_archive(
+                    archive, json.loads(manifest.read_text(encoding="utf-8")))
+                if current != next_archive:
+                    next_archive.unlink(missing_ok=True)
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
             raise
         finally:
             tmp_manifest.unlink(missing_ok=True)
