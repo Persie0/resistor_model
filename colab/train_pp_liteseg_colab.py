@@ -40,8 +40,9 @@ import sys
 import threading
 import time
 import urllib.request
+import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-11-v11-pip-timeout"
+PADDLESEG_COLAB_VERSION = "2026-10-13-v12-single-archive-cache"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -105,9 +106,11 @@ CUSTOM_CONFIG = WORK / "pp_liteseg_resistor_512.yml"
 DRIVE_MOUNT = Path("/content/drive")
 RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "segmentation-pp-liteseg"
 OUTPUT_DRIVE = RUN_DIR / "output"
-# Prepared training tree (v4 + blue merge + synth + 0/1 masks) persisted here,
-# so fresh sessions restore instead of re-downloading/re-encoding ~20k files.
+# Legacy (v11) per-file directory cache, left untouched for recovery.
 DRIVE_DATASET = RUN_DIR / "dataset"
+# The new cache is a single archive on Drive, extracted on Colab's local SSD.
+DRIVE_PREPARED_ARCHIVE = RUN_DIR / "prepared_dataset.zip"
+DRIVE_PREPARED_MANIFEST = RUN_DIR / "prepared_dataset.manifest.json"
 DRIVE_ARCHIVE_V4 = RUN_DIR / "archives" / "resistor_sam3_merged.zip"
 DRIVE_ARCHIVE_BLUE = RUN_DIR / "archives" / "blue_resistors_sam3.zip"
 DATASET_FINGERPRINT = {
@@ -603,22 +606,38 @@ def _start_drive_sync() -> threading.Event:
 
 
 def prepare_dataset() -> tuple[Path, str]:
-    """Prepared tree from Drive cache when possible, else build + persist.
+    """Restore one ZIP from Drive, or rebuild once and persist the new format.
 
-    Returns (dataset_root, source) where source is 'Drive cache' or
-    'freshly built'. Any recipe change (archive SHAs, synth variants/seed)
-    alters the fingerprint and triggers a rebuild automatically.
+    Old per-file caches stay intact but are deliberately not copied from Drive:
+    copying tens of thousands of FUSE-mounted files can take 40+ minutes.
+    Original source ZIPs already cached in Drive are used for the one-time
+    rebuild; subsequent sessions only transfer the packed prepared ZIP.
     """
+    if packed_dataset_cache.prepared_usable_archive(
+        DRIVE_PREPARED_ARCHIVE, DRIVE_PREPARED_MANIFEST, DATASET_FINGERPRINT,
+    ):
+        if packed_dataset_cache.restore_prepared_archive(
+            DRIVE_PREPARED_ARCHIVE, DRIVE_PREPARED_MANIFEST,
+            DATASET_ROOT, DATASET_FINGERPRINT,
+        ):
+            return find_dataset_root(DATASET_ROOT), "Drive ZIP cache"
     if dataset_cache.prepared_usable(DRIVE_DATASET, DATASET_FINGERPRINT):
-        print("[dataset-cache] fingerprint matches; restoring prepared dataset from Drive...", flush=True)
-        dataset_cache.restore_prepared(DRIVE_DATASET, DATASET_ROOT)
-        return find_dataset_root(DATASET_ROOT), "Drive cache"
+        print("[dataset-cache] old directory-format cache detected. Migrating by "
+              "rebuilding locally from cached source archives instead of slowly "
+              "copying thousands of files from Drive.", flush=True)
+    # A previous interrupted directory rsync may have copied the marker before
+    # all images. Never treat that partial local tree as a prepared dataset.
+    if DATASET_ROOT.exists():
+        shutil.rmtree(DATASET_ROOT)
     dataset_root = download_dataset()
     merge_blue_dataset(dataset_root)
     synthesize_body_colors(dataset_root)
     normalize_masks_01(dataset_root)
-    dataset_cache.persist_prepared(DATASET_ROOT, DRIVE_DATASET, DATASET_FINGERPRINT)
-    return dataset_root, "freshly built"
+    packed_dataset_cache.persist_prepared_archive(
+        DATASET_ROOT, DRIVE_PREPARED_ARCHIVE, DRIVE_PREPARED_MANIFEST,
+        DATASET_FINGERPRINT,
+    )
+    return dataset_root, "freshly built (ZIP cached)"
 
 
 def train(config: Path, dataset_source: str) -> None:
@@ -740,9 +759,27 @@ def summarize() -> None:
 
 
 def package_and_download() -> None:
+    """Package model outputs only, never the multi-GB Drive dataset caches.
+
+    Older runs can still contain the v11 per-file dataset directory and raw
+    source archives. Zipping RUN_DIR recursively would copy all of them again.
+    """
     if ZIP_PATH.exists():
         ZIP_PATH.unlink()
-    shutil.make_archive(str(ZIP_PATH.with_suffix("")), "zip", root_dir=RUN_DIR)
+    reports = [
+        p for p in RUN_DIR.iterdir()
+        if p.is_file() and (p.suffix in (".onnx", ".tflite", ".json")
+                            or p.name.endswith("_error.txt"))
+        and p.name != DRIVE_PREPARED_MANIFEST.name
+    ]
+    outputs = sorted(p for p in OUTPUT_DRIVE.rglob("*") if p.is_file()) if OUTPUT_DRIVE.exists() else []
+    selected = sorted(reports) + outputs
+    print(f"[package] packing {len(selected)} result files (excluding dataset caches)...", flush=True)
+    with zipfile.ZipFile(ZIP_PATH, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as output:
+        for i, path in enumerate(selected, 1):
+            output.write(path, arcname=path.relative_to(RUN_DIR).as_posix())
+            if i % 20 == 0 or i == len(selected):
+                print(f"[package] {i}/{len(selected)} files", flush=True)
     print(f"Created {ZIP_PATH} ({ZIP_PATH.stat().st_size / 1024 / 1024:.1f} MiB)", flush=True)
     try:
         from google.colab import files
@@ -757,8 +794,8 @@ def main() -> None:
     mount_drive()
     clone_repos()
     sys.path.insert(0, str(RESISTOR_REPO / "src"))
-    global dataset_cache
-    from resistor_model.tools import dataset_cache
+    global dataset_cache, packed_dataset_cache
+    from resistor_model.tools import dataset_cache, packed_dataset_cache
     install_dependencies()
     dataset_root, dataset_source = prepare_dataset()
     write_paddleseg_lists(dataset_root)
