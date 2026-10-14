@@ -296,10 +296,15 @@ def test_export_uses_static_512_shape_to_support_adaptive_pooling(tmp_path, monk
     monkeypatch.setattr(module, "IMAGE_SIZE", 512)
     monkeypatch.setattr(module, "_converter_executable", lambda: None)
 
+    export_source = module.PADDLESEG_DIR / "paddleseg" / "core" / "export.py"
+    export_source.parent.mkdir(parents=True)
+    original_export_source = "model = paddle.jit.to_static(model, input_spec=input_spec)\n"
+    export_source.write_text(original_export_source, encoding="utf-8")
     commands = []
 
     def fake_export(cmd, **kwargs):
         commands.append(cmd)
+        assert "full_graph=True" in export_source.read_text(encoding="utf-8")
         exported = work / "inference"
         exported.mkdir()
         (exported / "model.json").write_text("{}", encoding="utf-8")
@@ -312,6 +317,7 @@ def test_export_uses_static_512_shape_to_support_adaptive_pooling(tmp_path, monk
     assert commands[0][-5:] == ["--input_shape", "1", "3", "512", "512"]
     assert (module.DRIVE_INFERENCE / "model.json").is_file()
     assert (module.DRIVE_INFERENCE / "model.pdiparams").read_bytes() == b"native-inference"
+    assert export_source.read_text(encoding="utf-8") == original_export_source
 
 
 def test_fixed_shape_export_does_not_change_training_configuration():
@@ -319,3 +325,30 @@ def test_fixed_shape_export_does_not_change_training_configuration():
     assert module.ITERS == 8000
     assert module.IMAGE_SIZE == 512
     assert module._letterbox_preview_input(Image.new("RGB", (800, 400))).shape == (1, 3, 512, 512)
+
+
+
+def test_full_graph_export_restores_paddleseg_on_error(tmp_path, monkeypatch):
+    import subprocess
+    import pytest
+
+    module = _load_colab()
+    source = tmp_path / "PaddleSeg" / "paddleseg" / "core" / "export.py"
+    source.parent.mkdir(parents=True)
+    original = "model = paddle.jit.to_static(model, input_spec=input_spec)\n"
+    source.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(module, "PADDLESEG_DIR", tmp_path / "PaddleSeg")
+    calls = []
+
+    def fail_export(cmd, **kwargs):
+        calls.append(source.read_text(encoding="utf-8"))
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(module, "run_with_heartbeat", fail_export)
+    with pytest.raises(subprocess.CalledProcessError):
+        module._run_paddle_fixed_shape_export(["fake-paddleseg-export"])
+
+    assert len(calls) == 2  # Full graph first, then stock PaddleSeg fallback
+    assert "full_graph=True" in calls[0]
+    assert "full_graph=True" not in calls[1]
+    assert source.read_text(encoding="utf-8") == original
