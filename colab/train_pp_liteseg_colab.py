@@ -640,6 +640,42 @@ def prepare_dataset() -> tuple[Path, str]:
     return dataset_root, "freshly built (ZIP cached)"
 
 
+
+def _checkpoint_miou(best_dir: Path) -> float | None:
+    """mIoU stored by PaddleSeg in best_model/model.pdstates."""
+    states_path = best_dir / "model.pdstates"
+    if not states_path.is_file():
+        return None
+    try:
+        import paddle
+
+        states = paddle.load(str(states_path))
+        return float(states["mIoU"])
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f"[best] could not read mIoU at {states_path}: {exc}", flush=True)
+        return None
+
+
+def _keep_stronger_best_model(backup_dir: Path, previous_miou: float | None) -> None:
+    """Resume can overwrite best_model even if new validation quality is worse."""
+    if previous_miou is None or not backup_dir.is_dir():
+        return
+    best_dir = OUTPUT_LOCAL / "best_model"
+    new_miou = _checkpoint_miou(best_dir)
+    if new_miou is None or new_miou < previous_miou:
+        print(
+            f"[best] restoring pre-resume best model: mIoU={previous_miou:.4f} "
+            f"(current={new_miou})", flush=True,
+        )
+        if best_dir.exists():
+            shutil.rmtree(best_dir)
+        shutil.copytree(backup_dir, best_dir)
+    else:
+        print(f"[best] retained new best: mIoU={new_miou:.4f} "
+              f"(previous={previous_miou:.4f})", flush=True)
+
+
+
 def train(config: Path, dataset_source: str) -> None:
     OUTPUT_LOCAL.mkdir(parents=True, exist_ok=True)
     if OUTPUT_DRIVE.is_dir():
@@ -664,6 +700,29 @@ def train(config: Path, dataset_source: str) -> None:
     if resume is not None:
         command.extend(["--resume_model", resume])
     print_run_configuration(find_dataset_root(DATASET_ROOT), resume, dataset_source)
+    # PaddleSeg starts best_mean_iou=-1 on EVERY invocation, even after resume.
+    # Save the previous winner outside the synced output so later evaluations
+    # cannot silently replace a superior best_model.
+    backup_dir = WORK / "best_model_before_resume"
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    old_miou = None
+    if resume is not None:
+        previous_best = OUTPUT_LOCAL / "best_model"
+        old_miou = _checkpoint_miou(previous_best)
+        if old_miou is not None and (previous_best / "model.pdparams").is_file():
+            shutil.copytree(previous_best, backup_dir)
+            print(f"[best] previous best mIoU={old_miou:.4f}, safe backup created", flush=True)
+        # A finished 8k run may be re-opened only to export or preview.
+        try:
+            completed_iter = int(Path(resume).name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            completed_iter = -1
+        if completed_iter >= ITERS:
+            print(f"[resume] iter_{completed_iter} already reaches target {ITERS}; "
+                  "skipping re-training", flush=True)
+            _sync_dir_to_drive()
+            return
     stop_sync = _start_drive_sync()
     # tools/train.py does `from paddleseg...`: the script's own dir (tools/)
     # lands on sys.path, not the repo root, so point PYTHONPATH at PaddleSeg.
@@ -672,6 +731,7 @@ def train(config: Path, dataset_source: str) -> None:
         run_with_heartbeat(command, cwd=PADDLESEG_DIR, extra_env=paddle_env)
     finally:
         stop_sync.set()
+    _keep_stronger_best_model(backup_dir, old_miou)
     print("[train] final sync of outputs to Drive...", flush=True)
     _sync_dir_to_drive()
 
