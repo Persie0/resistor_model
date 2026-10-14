@@ -242,5 +242,4 @@ def test_paddleseg_checkpoint_preview_builds_model_via_segbuilder(tmp_path, monk
     predictor = module._load_preview_predictor(None)
     assert callable(predictor)
     assert recorded == [str(checkpoint)]
-    dummy = types.SimpleNamespace(numpy=lambda: np.ones((1, 2, 8, 8)))
-    assert predictor(dummy).shape == (1, 2, 8, 8)
+    assert predictor(np.ones((1, 2, 8, 8))).shape == (1, 2, 8, 8)
