@@ -138,3 +138,108 @@ def test_paddle_export_is_persisted_and_packaged_even_without_onnx():
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "shutil.copytree(inference_dir, DRIVE_INFERENCE, dirs_exist_ok=True)" in source
     assert 'DRIVE_INFERENCE.rglob("*")' in source
+
+
+def test_existing_converter_missing_packaging_is_repaired_without_reinstalling_paddle(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    module = _load_colab()
+    venv = tmp_path / "py312"
+    binary = venv / "bin" / "paddle2onnx"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!fake", encoding="utf-8")
+    monkeypatch.setattr(module, "CONVERTER_VENV", venv)
+    installed = []
+    commands = []
+    monkeypatch.setattr(module, "_pip_install", lambda args, description: installed.append(args))
+    monkeypatch.setattr(
+        module, "run_with_heartbeat",
+        lambda args, **kwargs: commands.append(args),
+    )
+    states = iter((
+        SimpleNamespace(returncode=1, stdout="", stderr="No module named 'packaging'"),
+        SimpleNamespace(returncode=0, stdout="paddle2onnx 2.1.0", stderr=""),
+    ))
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: next(states))
+    assert module._converter_executable() == binary
+    assert installed == [["-q", "uv"]]
+    assert len(commands) == 1
+    assert "packaging>=23,<27" in commands[0]
+    assert "paddlepaddle==3.1.1" not in commands[0]
+    assert "paddle2onnx==2.1.0" not in commands[0]
+
+
+def test_healthy_converter_reused_without_any_install(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    module = _load_colab()
+    venv = tmp_path / "py312"
+    binary = venv / "bin" / "paddle2onnx"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!fake", encoding="utf-8")
+    monkeypatch.setattr(module, "CONVERTER_VENV", venv)
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs:
+                        SimpleNamespace(returncode=0, stdout="2.1.0", stderr=""))
+    monkeypatch.setattr(module, "_pip_install", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("a healthy converter must not reinstall dependencies")
+    ))
+    assert module._converter_executable() == binary
+
+
+def test_paddleseg_checkpoint_preview_builds_model_via_segbuilder(tmp_path, monkeypatch):
+    import sys
+    import types
+    from contextlib import nullcontext
+
+    module = _load_colab()
+    checkpoint = tmp_path / "output" / "best_model" / "model.pdparams"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"placeholder")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("model: {}", encoding="utf-8")
+    source_dir = tmp_path / "PaddleSeg"
+    source_dir.mkdir()
+    monkeypatch.setattr(module, "OUTPUT_LOCAL", checkpoint.parent.parent)
+    monkeypatch.setattr(module, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(module, "CUSTOM_CONFIG", config_path)
+    monkeypatch.setattr(module, "PADDLESEG_DIR", source_dir)
+
+    class FakeModel:
+        def eval(self):
+            return None
+
+        def __call__(self, tensor):
+            return [tensor]
+
+    class FakeConfig:
+        def __init__(self, path):
+            self.path = path
+            # Deliberately no .model: PaddleSeg 2.10 doesn't expose it.
+
+    class FakeSegBuilder:
+        def __init__(self, cfg):
+            self.model = FakeModel()
+
+    cvlibs = types.ModuleType("paddleseg.cvlibs")
+    cvlibs.Config, cvlibs.SegBuilder = FakeConfig, FakeSegBuilder
+    utils = types.ModuleType("paddleseg.utils")
+    recorded = []
+    utils.utils = types.SimpleNamespace(
+        load_entire_model=lambda model, path: recorded.append(path)
+    )
+    paddle = types.ModuleType("paddle")
+    paddle.no_grad = lambda: nullcontext()
+    paddle.to_tensor = lambda arr: types.SimpleNamespace(numpy=lambda: arr)
+
+    package = types.ModuleType("paddleseg")
+    package.__path__ = [str(source_dir)]
+    monkeypatch.setitem(sys.modules, "paddle", paddle)
+    monkeypatch.setitem(sys.modules, "paddleseg", package)
+    monkeypatch.setitem(sys.modules, "paddleseg.cvlibs", cvlibs)
+    monkeypatch.setitem(sys.modules, "paddleseg.utils", utils)
+
+    predictor = module._load_preview_predictor(None)
+    assert callable(predictor)
+    assert recorded == [str(checkpoint)]
+    assert predictor(np.ones((1, 2, 8, 8))).shape == (1, 2, 8, 8)
