@@ -42,7 +42,7 @@ import time
 import urllib.request
 import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-14-v13-8k-upload-preview"
+PADDLESEG_COLAB_VERSION = "2026-10-14-v14-py312-conversion-preview-fix"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -122,6 +122,8 @@ DATASET_FINGERPRINT = {
     "masks01": 1,
 }
 ZIP_PATH = WORK / "resistor-segmentation-pp-liteseg.zip"
+CONVERTER_VENV = WORK / "onnx-converter-py312"
+DRIVE_INFERENCE = RUN_DIR / "paddle_inference"
 
 
 def run(cmd: list[str], *, cwd: Path | None = None) -> None:
@@ -736,6 +738,50 @@ def train(config: Path, dataset_source: str) -> None:
     _sync_dir_to_drive()
 
 
+def _converter_executable() -> Path | None:
+    """Use isolated Python 3.12 wheels: Paddle2ONNX/ONNX lack cp313 wheels.
+
+    Keep the working Colab Python 3.13 + CUDA Paddle installation untouched.
+    uv installs its own managed Python 3.12 when the runtime lacks one.
+    """
+    binary = CONVERTER_VENV / "bin" / "paddle2onnx"
+    if binary.is_file():
+        return binary
+    print("[onnx] Paddle2ONNX 2.1.0 + ONNX 1.17 have Python 3.12 wheels, "
+          "but not Python 3.13 wheels; creating separate 3.12 converter.", flush=True)
+    try:
+        # uv itself has cp313 wheels and can install a standalone CPython 3.12.
+        _pip_install(["-q", "uv"], description="uv for isolated ONNX converter")
+        run_with_heartbeat([
+            sys.executable, "-m", "uv", "venv", "--python", "3.12", str(CONVERTER_VENV),
+        ], heartbeat_seconds=60)
+        run_with_heartbeat([
+            sys.executable, "-m", "uv", "pip", "install", "--python",
+            str(CONVERTER_VENV / "bin" / "python"),
+            "paddlepaddle==3.1.1", "paddle2onnx==2.1.0",
+        ], heartbeat_seconds=60)
+        if not binary.is_file():
+            raise RuntimeError(f"Converter executable missing after installation: {binary}")
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        (RUN_DIR / "onnx_setup_error.txt").write_text(
+            f"Python 3.12 converter install failed: {exc}\n", encoding="utf-8"
+        )
+        print(f"[onnx] converter setup failed: {exc}. PaddleSeg inference saved.", flush=True)
+        return None
+    return binary
+
+
+def _inference_model_filename(inference_dir: Path) -> str:
+    """Paddle 3.x may export PIR model.json instead of legacy model.pdmodel."""
+    for name in ("model.json", "model.pdmodel"):
+        if (inference_dir / name).is_file():
+            return name
+    raise FileNotFoundError(
+        f"Export completed but neither model.json nor model.pdmodel exists "
+        f"in {inference_dir}; found: {[p.name for p in inference_dir.iterdir()]}"
+    )
+
+
 def export_and_convert() -> Path | None:
     best = OUTPUT_LOCAL / "best_model" / "model.pdparams"
     if not best.is_file():
@@ -751,36 +797,50 @@ def export_and_convert() -> Path | None:
         ], cwd=PADDLESEG_DIR, extra_env={"PYTHONPATH": str(PADDLESEG_DIR)})
     except subprocess.CalledProcessError as exc:
         (RUN_DIR / "export_error.txt").write_text(str(exc), encoding="utf-8")
-        print("[export] PaddleSeg export failed; run help: tools/export.py --help", flush=True)
+        print("[export] PaddleSeg export failed; best checkpoint remains safe in Drive.", flush=True)
         return None
-    onnx_path = RUN_DIR / "resistor_segmenter_ppliteseg.onnx"
-    pip_best_effort(["paddle2onnx", "onnx"], description="paddle2onnx for ONNX export")
+
+    # Persist the native Paddle model even when ONNX conversion is not possible.
+    shutil.copytree(inference_dir, DRIVE_INFERENCE, dirs_exist_ok=True)
+    print(f"[export] native Paddle inference model saved to {DRIVE_INFERENCE}", flush=True)
     try:
-        run([
-            sys.executable, "-m", "paddle2onnx",
+        model_filename = _inference_model_filename(inference_dir)
+        converter = _converter_executable()
+        if converter is None:
+            return None
+        onnx_path = RUN_DIR / "resistor_segmenter_ppliteseg.onnx"
+        # Remove any stale model before converting, to avoid false success.
+        onnx_path.unlink(missing_ok=True)
+        run_with_heartbeat([
+            str(converter),
             "--model_dir", str(inference_dir),
-            "--model_filename", "model.pdmodel",
+            "--model_filename", model_filename,
             "--params_filename", "model.pdiparams",
             "--save_file", str(onnx_path),
             "--opset_version", "12",
-            "--enable_onnx_checker", "True",
-        ])
+        ], heartbeat_seconds=60)
+        if not onnx_path.is_file() or onnx_path.stat().st_size == 0:
+            raise RuntimeError("Paddle2ONNX returned without creating an ONNX file")
         print(f"[export] ONNX bytes: {onnx_path.stat().st_size / 1024:.1f} KiB", flush=True)
-    except subprocess.CalledProcessError as exc:
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         (RUN_DIR / "onnx_export_error.txt").write_text(str(exc), encoding="utf-8")
-        print("[export] paddle2onnx failed; inference model remains in Drive output.", flush=True)
+        print(f"[export] ONNX conversion failed: {exc}. Native Paddle model remains usable.", flush=True)
         return None
-    try:
-        pip_best_effort(["onnx2tf", "onnxsim"], description="onnx2tf for TFLite conversion")
-        run([sys.executable, "-m", "onnx2tf", "-i", str(onnx_path), "-o", str(RUN_DIR / "tflite_tmp")])
-        candidates = sorted((RUN_DIR / "tflite_tmp").rglob("*.tflite"))
-        if candidates:
-            tflite_path = RUN_DIR / "resistor_segmenter_ppliteseg.tflite"
-            shutil.copy(candidates[0], tflite_path)
-            print(f"[export] TFLite bytes: {tflite_path.stat().st_size / 1024:.1f} KiB", flush=True)
-    except subprocess.CalledProcessError as exc:
-        (RUN_DIR / "tflite_export_error.txt").write_text(str(exc), encoding="utf-8")
-        print("[export] TFLite conversion failed; ONNX remains the mobile artifact.", flush=True)
+
+    if pip_best_effort(["onnx2tf", "onnxsim"], description="onnx2tf for TFLite conversion"):
+        try:
+            run_with_heartbeat([
+                sys.executable, "-m", "onnx2tf", "-i", str(onnx_path),
+                "-o", str(RUN_DIR / "tflite_tmp"),
+            ], heartbeat_seconds=60)
+            candidates = sorted((RUN_DIR / "tflite_tmp").rglob("*.tflite"))
+            if candidates:
+                tflite_path = RUN_DIR / "resistor_segmenter_ppliteseg.tflite"
+                shutil.copy(candidates[0], tflite_path)
+                print(f"[export] TFLite bytes: {tflite_path.stat().st_size / 1024:.1f} KiB", flush=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            (RUN_DIR / "tflite_export_error.txt").write_text(str(exc), encoding="utf-8")
+            print(f"[export] TFLite conversion failed: {exc}; ONNX remains available.", flush=True)
     return onnx_path
 
 
@@ -833,7 +893,8 @@ def package_and_download() -> None:
         and p.name != DRIVE_PREPARED_MANIFEST.name
     ]
     outputs = sorted(p for p in OUTPUT_DRIVE.rglob("*") if p.is_file()) if OUTPUT_DRIVE.exists() else []
-    selected = sorted(reports) + outputs
+    inference = sorted(p for p in DRIVE_INFERENCE.rglob("*") if p.is_file()) if DRIVE_INFERENCE.exists() else []
+    selected = sorted(reports) + outputs + inference
     print(f"[package] packing {len(selected)} result files (excluding dataset caches)...", flush=True)
     with zipfile.ZipFile(ZIP_PATH, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as output:
         for i, path in enumerate(selected, 1):
@@ -941,11 +1002,17 @@ def _load_preview_predictor(onnx_path: Path | None):
             print(f"[preview] ONNX failed to load: {exc}; trying Paddle checkpoint", flush=True)
 
     checkpoint = OUTPUT_LOCAL / "best_model" / "model.pdparams"
+    if not checkpoint.is_file():
+        checkpoint = OUTPUT_DRIVE / "best_model" / "model.pdparams"
     if not checkpoint.is_file() or not CUSTOM_CONFIG.is_file() or not PADDLESEG_DIR.is_dir():
         print("[preview] No usable ONNX or local Paddle checkpoint. "
               "Model download was retained; upload preview is unavailable.", flush=True)
         return None
 
+    # PaddleSeg lives in a checked-out source tree, not site-packages.
+    # Subprocess exports set PYTHONPATH; direct Colab inference also needs it.
+    if str(PADDLESEG_DIR) not in sys.path:
+        sys.path.insert(0, str(PADDLESEG_DIR))
     import paddle
     from paddleseg.cvlibs import Config
     from paddleseg.utils import utils
@@ -1045,6 +1112,20 @@ def main() -> None:
     if os.environ.get("PP_LITESEG_PREVIEW_ONLY") == "1":
         mount_drive()
         preview_uploaded_images()
+        return
+    if os.environ.get("PP_LITESEG_EXPORT_ONLY") == "1":
+        require_gpu()
+        mount_drive()
+        clone_repos()
+        install_dependencies()
+        OUTPUT_LOCAL.mkdir(parents=True, exist_ok=True)
+        if OUTPUT_DRIVE.is_dir():
+            shutil.copytree(OUTPUT_DRIVE, OUTPUT_LOCAL, dirs_exist_ok=True)
+        build_custom_config(DATASET_ROOT)  # only model architecture is used for export
+        onnx_path = export_and_convert()
+        summarize()
+        package_and_download()
+        preview_uploaded_images(onnx_path)
         return
     require_gpu()
     mount_drive()
