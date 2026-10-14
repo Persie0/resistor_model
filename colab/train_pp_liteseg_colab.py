@@ -42,7 +42,7 @@ import time
 import urllib.request
 import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-13-v12-single-archive-cache"
+PADDLESEG_COLAB_VERSION = "2026-10-14-v13-8k-upload-preview"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -61,9 +61,9 @@ BLUE_DATASET_URL = "https://github.com/Persie0/resistor_model/releases/download/
 BLUE_DATASET_SHA256 = "800bd3aef16f1fbd2e98adbc2ba3c99551cbaf0f9b4c772614fa01909ceb733e"
 MODEL_TYPE_NEEDLE = "liteseg"  # parsed stock config must be a PP-LiteSeg model
 IMAGE_SIZE = 512
-# ~30 epochs at bs48 (19352 train pairs -> ~403 iters/epoch). bs16 needed 20k
-# iters for ~16 epochs; keeping 20k at bs48 would train ~50 epochs (~11h).
-ITERS = 12000
+# ~20 epochs at bs48 (19352 train pairs -> ~403 iters/epoch).
+# Stop at 8k and retain whichever validation checkpoint has the best mIoU.
+ITERS = 8000
 # Sized for a 15 GB T4: activations scale ~linearly, bs16 ~= 3.4 GB reserved,
 # so bs48 lands ~9-10 GB fp32 (~6-7 GB with AMP below). If you ever hit OOM
 # (e.g. smaller GPU), drop to 32. LR stays at the stock 0.01: larger batches
@@ -788,8 +788,203 @@ def package_and_download() -> None:
         print("Output remains persistently available at", RUN_DIR, flush=True)
 
 
+
+def _foreground_mask_from_output(output: object) -> "np.ndarray":
+    """Convert an ONNX or PaddleSeg batch=1 output to a 2-D foreground mask."""
+    import numpy as np
+
+    arr = np.asarray(output)
+    if arr.ndim == 4:
+        if arr.shape[0] != 1:
+            raise ValueError(f"Expected batch size 1, got model output {arr.shape}")
+        arr = arr[0]
+    if arr.ndim == 3:
+        if arr.shape[0] == NUM_CLASSES:
+            return arr.argmax(axis=0) == 1
+        if arr.shape[-1] == NUM_CLASSES:
+            return arr.argmax(axis=-1) == 1
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        elif arr.shape[-1] == 1:
+            arr = arr[..., 0]
+        else:
+            raise ValueError(f"Unknown output channel layout: {arr.shape}")
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2-D mask, got model output {arr.shape}")
+    if arr.dtype.kind in ("b", "i", "u"):
+        return arr > 0
+    return arr >= 0.5
+
+
+def _letterbox_preview_input(image: "Image.Image") -> "np.ndarray":
+    """Exactly match the existing ONNX test evaluator's RGB letterboxing/normalization."""
+    import numpy as np
+    from PIL import Image
+
+    width, height = image.size
+    scale = min(IMAGE_SIZE / width, IMAGE_SIZE / height)
+    new_width = max(1, round(width * scale))
+    new_height = max(1, round(height * scale))
+    scaled = image.resize((new_width, new_height), Image.Resampling.BILINEAR)
+    canvas = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE))
+    canvas.paste(scaled, ((IMAGE_SIZE - new_width) // 2, (IMAGE_SIZE - new_height) // 2))
+    rgb = np.asarray(canvas, dtype=np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    return ((rgb - mean) / std).transpose(2, 0, 1)[None].astype(np.float32)
+
+
+def _unletterbox_preview_mask(
+    foreground: "np.ndarray", original_size: tuple[int, int],
+    display_size: tuple[int, int],
+) -> "np.ndarray":
+    """Undo padding before resizing to the preview (not full-size image) dimensions."""
+    import numpy as np
+    from PIL import Image
+
+    width, height = original_size
+    scale = min(IMAGE_SIZE / width, IMAGE_SIZE / height)
+    new_width = max(1, round(width * scale))
+    new_height = max(1, round(height * scale))
+    x0, y0 = (IMAGE_SIZE - new_width) // 2, (IMAGE_SIZE - new_height) // 2
+    mask = Image.fromarray(np.asarray(foreground, dtype=np.uint8) * 255)
+    if mask.size != (IMAGE_SIZE, IMAGE_SIZE):
+        mask = mask.resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.NEAREST)
+    cropped = mask.crop((x0, y0, x0 + new_width, y0 + new_height))
+    return np.asarray(cropped.resize(display_size, Image.Resampling.NEAREST)) > 0
+
+
+def _load_preview_predictor(onnx_path: Path | None):
+    """Prefer the exported mobile model, fall back to the real PaddleSeg best checkpoint."""
+    onnx = onnx_path if onnx_path and onnx_path.is_file() else (
+        RUN_DIR / "resistor_segmenter_ppliteseg.onnx"
+    )
+    if onnx.is_file():
+        try:
+            try:
+                import onnxruntime as ort
+            except ImportError:
+                if not pip_best_effort(["onnxruntime"], description="ONNX image preview"):
+                    raise RuntimeError("Could not install onnxruntime")
+                import onnxruntime as ort
+
+            session = ort.InferenceSession(str(onnx), providers=["CPUExecutionProvider"])
+            model_input = session.get_inputs()[0].name
+            print(f"[preview] testing exported ONNX: {onnx}", flush=True)
+
+            def predict_onnx(tensor):
+                return session.run(None, {model_input: tensor})[0]
+
+            return predict_onnx
+        except Exception as exc:
+            print(f"[preview] ONNX failed to load: {exc}; trying Paddle checkpoint", flush=True)
+
+    checkpoint = OUTPUT_LOCAL / "best_model" / "model.pdparams"
+    if not checkpoint.is_file() or not CUSTOM_CONFIG.is_file() or not PADDLESEG_DIR.is_dir():
+        print("[preview] No usable ONNX or local Paddle checkpoint. "
+              "Model download was retained; upload preview is unavailable.", flush=True)
+        return None
+
+    import paddle
+    from paddleseg.cvlibs import Config
+    from paddleseg.utils import utils
+
+    config = Config(str(CUSTOM_CONFIG))
+    model = config.model
+    utils.load_entire_model(model, str(checkpoint))
+    model.eval()
+    print(f"[preview] testing PaddleSeg checkpoint: {checkpoint}", flush=True)
+
+    def predict_paddle(tensor):
+        with paddle.no_grad():
+            result = model(paddle.to_tensor(tensor))
+        if isinstance(result, (tuple, list)):
+            result = result[0]
+        return result.numpy()
+
+    return predict_paddle
+
+
+def preview_uploaded_images(onnx_path: Path | None = None) -> None:
+    """Optional visual smoke test AFTER the training ZIP download.
+
+    Google Colab's native uploader accepts several images in one operation.
+    Preview images stay local to the Colab VM, not in the Drive training cache.
+    The result is qualitative; images without GT masks cannot produce IoU.
+    """
+    predictor = _load_preview_predictor(onnx_path)
+    if predictor is None:
+        return
+
+    import io
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    from google.colab import files
+
+    print("\n[preview] Training/export/download stage is complete.", flush=True)
+    print("[preview] Upload one or multiple resistor photos (JPG/PNG/WEBP/BMP).", flush=True)
+    print("[preview] The output shows original / predicted body mask / red overlay.", flush=True)
+    print("[preview] This is a visual test, NOT a ground-truth accuracy/IoU score.", flush=True)
+    uploaded = files.upload()
+    if not uploaded:
+        print("[preview] No images uploaded; model files remain in Drive.", flush=True)
+        return
+
+    preview_dir = WORK / "manual_previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    for index, (filename, data) in enumerate(uploaded.items(), start=1):
+        try:
+            with Image.open(io.BytesIO(data)) as source:
+                photo = ImageOps.exif_transpose(source).convert("RGB")
+            if min(photo.size) < 1:
+                raise ValueError("Empty image")
+            original_size = photo.size
+            tensor = _letterbox_preview_input(photo)
+            foreground = _foreground_mask_from_output(predictor(tensor))
+
+            photo.thumbnail((900, 900), Image.Resampling.LANCZOS)
+            mask = _unletterbox_preview_mask(foreground, original_size, photo.size)
+            overlay = np.asarray(photo).copy()
+            tint = np.array([255, 40, 40], dtype=np.float32)
+            overlay[mask] = (
+                overlay[mask].astype(np.float32) * 0.40 + tint * 0.60
+            ).astype(np.uint8)
+
+            safe_stem = f"upload_{index:03d}"
+            Image.fromarray(mask.astype(np.uint8) * 255).save(preview_dir / f"{safe_stem}_mask.png")
+            Image.fromarray(overlay).save(preview_dir / f"{safe_stem}_overlay.png")
+
+            figure, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+            axes[0].imshow(photo)
+            axes[0].set_title("Original")
+            axes[1].imshow(mask, cmap="gray", vmin=0, vmax=1)
+            axes[1].set_title("Resistor body mask")
+            axes[2].imshow(overlay)
+            axes[2].set_title("Overlay (red = detected)")
+            for ax in axes:
+                ax.axis("off")
+            figure.suptitle(f"{index}. {filename}  |  mask coverage: {100 * mask.mean():.1f}%")
+            figure.tight_layout()
+            plt.show()
+            plt.close(figure)
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            print(f"[preview] Skipped {filename!r}: {exc}", flush=True)
+        except Exception as exc:
+            print(f"[preview] Inference failed for {filename!r}: {exc}", flush=True)
+    print(f"[preview] Masks and overlays saved locally: {preview_dir}", flush=True)
+    print("[preview] To test more photos later, run a new Colab cell with:", flush=True)
+    print("  import runpy", flush=True)
+    print("  p = runpy.run_path('/content/train_pp_liteseg_colab.py')", flush=True)
+    print("  p['preview_uploaded_images']()", flush=True)
+
+
 def main() -> None:
     print(f"PaddleSeg Colab version: {PADDLESEG_COLAB_VERSION}", flush=True)
+    if os.environ.get("PP_LITESEG_PREVIEW_ONLY") == "1":
+        mount_drive()
+        preview_uploaded_images()
+        return
     require_gpu()
     mount_drive()
     clone_repos()
@@ -805,6 +1000,11 @@ def main() -> None:
     evaluate_test(onnx_path, dataset_root)
     summarize()
     package_and_download()
+    try:
+        preview_uploaded_images(onnx_path)
+    except Exception as exc:
+        print(f"[preview] Optional upload test failed: {exc}", flush=True)
+        print(f"[preview] Training ZIP is already saved at {ZIP_PATH}", flush=True)
 
 
 if __name__ == "__main__":
