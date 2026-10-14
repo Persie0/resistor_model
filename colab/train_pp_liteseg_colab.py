@@ -42,7 +42,7 @@ import time
 import urllib.request
 import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-14-v16-converter-runtime-deps"
+PADDLESEG_COLAB_VERSION = "2026-10-14-v17-static-shape-full-graph"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -826,6 +826,60 @@ def _inference_model_filename(inference_dir: Path) -> str:
     )
 
 
+def _run_paddle_fixed_shape_export(command: list[str]) -> None:
+    """Force Paddle 3.x to honor InputSpec's fixed dimensions.
+
+    PaddleSeg release/2.10 calls to_static(model, input_spec=input_spec)
+    without full_graph=True. Paddle 3.1 warns that this ignores input_spec,
+    so merely adding --input_shape may not fix ONNX's adaptive pooling.
+    Patch only the cloned PaddleSeg module for this export subprocess and
+    restore the original source even if export fails.
+    """
+    export_source = PADDLESEG_DIR / "paddleseg" / "core" / "export.py"
+    original = export_source.read_text(encoding="utf-8")
+    dynamic_call = "model = paddle.jit.to_static(model, input_spec=input_spec)"
+    full_graph_call = (
+        "model = paddle.jit.to_static("
+        "model, input_spec=input_spec, full_graph=True)"
+    )
+    if full_graph_call in original:
+        print("[export] PaddleSeg already exports full_graph=True", flush=True)
+        run_with_heartbeat(
+            command, cwd=PADDLESEG_DIR,
+            extra_env={"PYTHONPATH": str(PADDLESEG_DIR)},
+        )
+        return
+    if original.count(dynamic_call) != 1:
+        raise RuntimeError(
+            "PaddleSeg core/export.py has an unexpected to_static implementation; "
+            "refusing to silently export a dynamic-shape graph"
+        )
+
+    export_source.write_text(
+        original.replace(dynamic_call, full_graph_call), encoding="utf-8"
+    )
+    try:
+        print("[export] forcing Paddle to_static(full_graph=True) "
+              "to honor the 512x512 InputSpec", flush=True)
+        try:
+            run_with_heartbeat(
+                command, cwd=PADDLESEG_DIR,
+                extra_env={"PYTHONPATH": str(PADDLESEG_DIR)},
+            )
+        except subprocess.CalledProcessError:
+            # If SOT full_graph conversion is incompatible with this
+            # architecture, preserve Paddle's earlier working export method.
+            print("[export] full_graph=True was rejected; "
+                  "retrying PaddleSeg's standard export path", flush=True)
+            export_source.write_text(original, encoding="utf-8")
+            run_with_heartbeat(
+                command, cwd=PADDLESEG_DIR,
+                extra_env={"PYTHONPATH": str(PADDLESEG_DIR)},
+            )
+    finally:
+        export_source.write_text(original, encoding="utf-8")
+
+
 def export_and_convert() -> Path | None:
     best = OUTPUT_LOCAL / "best_model" / "model.pdparams"
     if not best.is_file():
@@ -833,13 +887,21 @@ def export_and_convert() -> Path | None:
         return None
     inference_dir = WORK / "inference"
     try:
-        run_with_heartbeat([
+        # PP-LiteSeg uses adaptive pooling. Paddle2ONNX cannot translate its
+        # pd_op.pool2d with dynamic spatial dimensions [-1, 3, -1, -1].
+        # Export the exact 512x512 tensor used by mobile inference, previews
+        # and validation. No retraining or change to best_model is required.
+        export_shape = ["1", "3", str(IMAGE_SIZE), str(IMAGE_SIZE)]
+        print(f"[export] fixing input shape to NCHW={export_shape} "
+              "for Paddle2ONNX adaptive pooling", flush=True)
+        _run_paddle_fixed_shape_export([
             sys.executable, str(PADDLESEG_DIR / "tools" / "export.py"),
             "--config", str(CUSTOM_CONFIG),
             "--model_path", str(best),
             "--save_dir", str(inference_dir),
-        ], cwd=PADDLESEG_DIR, extra_env={"PYTHONPATH": str(PADDLESEG_DIR)})
-    except subprocess.CalledProcessError as exc:
+            "--input_shape", *export_shape,
+        ])
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         (RUN_DIR / "export_error.txt").write_text(str(exc), encoding="utf-8")
         print("[export] PaddleSeg export failed; best checkpoint remains safe in Drive.", flush=True)
         return None

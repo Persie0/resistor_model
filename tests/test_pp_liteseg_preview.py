@@ -274,3 +274,81 @@ def test_existing_converter_missing_setuptools_repairs_all_runtime_dependencies(
     assert set(("packaging>=23,<27", "setuptools>=68", "wheel>=0.42")).issubset(set(commands[0]))
     assert "paddlepaddle==3.1.1" not in commands[0]
     assert "paddle2onnx==2.1.0" not in commands[0]
+
+
+
+def test_export_uses_static_512_shape_to_support_adaptive_pooling(tmp_path, monkeypatch):
+    """Paddle2ONNX aborts on PP-LiteSeg adaptive pool with dynamic [-1,3,-1,-1]."""
+    module = _load_colab()
+    work = tmp_path / "work"
+    work.mkdir()
+    best = tmp_path / "checkpoint" / "best_model" / "model.pdparams"
+    best.parent.mkdir(parents=True)
+    best.write_bytes(b"checkpoint")
+    custom_config = tmp_path / "model.yml"
+    custom_config.write_text("model: {}", encoding="utf-8")
+
+    monkeypatch.setattr(module, "OUTPUT_LOCAL", best.parent.parent)
+    monkeypatch.setattr(module, "WORK", work)
+    monkeypatch.setattr(module, "DRIVE_INFERENCE", tmp_path / "persistent" / "paddle_inference")
+    monkeypatch.setattr(module, "CUSTOM_CONFIG", custom_config)
+    monkeypatch.setattr(module, "PADDLESEG_DIR", tmp_path / "PaddleSeg")
+    monkeypatch.setattr(module, "IMAGE_SIZE", 512)
+    monkeypatch.setattr(module, "_converter_executable", lambda: None)
+
+    export_source = module.PADDLESEG_DIR / "paddleseg" / "core" / "export.py"
+    export_source.parent.mkdir(parents=True)
+    original_export_source = "model = paddle.jit.to_static(model, input_spec=input_spec)\n"
+    export_source.write_text(original_export_source, encoding="utf-8")
+    commands = []
+
+    def fake_export(cmd, **kwargs):
+        commands.append(cmd)
+        assert "full_graph=True" in export_source.read_text(encoding="utf-8")
+        exported = work / "inference"
+        exported.mkdir()
+        (exported / "model.json").write_text("{}", encoding="utf-8")
+        (exported / "model.pdiparams").write_bytes(b"native-inference")
+
+    monkeypatch.setattr(module, "run_with_heartbeat", fake_export)
+
+    assert module.export_and_convert() is None  # Converter intentionally unavailable
+    assert len(commands) == 1
+    assert commands[0][-5:] == ["--input_shape", "1", "3", "512", "512"]
+    assert (module.DRIVE_INFERENCE / "model.json").is_file()
+    assert (module.DRIVE_INFERENCE / "model.pdiparams").read_bytes() == b"native-inference"
+    assert export_source.read_text(encoding="utf-8") == original_export_source
+
+
+def test_fixed_shape_export_does_not_change_training_configuration():
+    module = _load_colab()
+    assert module.ITERS == 8000
+    assert module.IMAGE_SIZE == 512
+    assert module._letterbox_preview_input(Image.new("RGB", (800, 400))).shape == (1, 3, 512, 512)
+
+
+
+def test_full_graph_export_restores_paddleseg_on_error(tmp_path, monkeypatch):
+    import subprocess
+    import pytest
+
+    module = _load_colab()
+    source = tmp_path / "PaddleSeg" / "paddleseg" / "core" / "export.py"
+    source.parent.mkdir(parents=True)
+    original = "model = paddle.jit.to_static(model, input_spec=input_spec)\n"
+    source.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(module, "PADDLESEG_DIR", tmp_path / "PaddleSeg")
+    calls = []
+
+    def fail_export(cmd, **kwargs):
+        calls.append(source.read_text(encoding="utf-8"))
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(module, "run_with_heartbeat", fail_export)
+    with pytest.raises(subprocess.CalledProcessError):
+        module._run_paddle_fixed_shape_export(["fake-paddleseg-export"])
+
+    assert len(calls) == 2  # Full graph first, then stock PaddleSeg fallback
+    assert "full_graph=True" in calls[0]
+    assert "full_graph=True" not in calls[1]
+    assert source.read_text(encoding="utf-8") == original
