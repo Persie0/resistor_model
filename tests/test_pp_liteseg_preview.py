@@ -101,3 +101,40 @@ def test_resume_keeps_improved_checkpoint(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(module, "_checkpoint_miou", lambda path: 0.9100)
     module._keep_stronger_best_model(backup, previous_miou=0.8985)
     assert (best / "model.pdparams").read_bytes() == b"better-new-model"
+
+
+def test_converter_uses_isolated_py312_instead_of_colab_python313():
+    module = _load_colab()
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "onnx-converter-py312" in source
+    assert '"venv", "--python", "3.12"' in source
+    assert '"paddle2onnx==2.1.0"' in source
+    assert '"paddlepaddle==3.1.1"' in source
+    assert 'def _inference_model_filename' in source
+    assert 'if str(PADDLESEG_DIR) not in sys.path' in source
+    assert '"PP_LITESEG_EXPORT_ONLY"' in source
+
+
+def test_converter_model_filename_prefers_paddle3_json(tmp_path: Path):
+    module = _load_colab()
+    (tmp_path / "model.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "model.pdmodel").write_bytes(b"legacy")
+    assert module._inference_model_filename(tmp_path) == "model.json"
+    (tmp_path / "model.json").unlink()
+    assert module._inference_model_filename(tmp_path) == "model.pdmodel"
+
+
+def test_converter_fails_readably_if_exported_graph_absent(tmp_path: Path):
+    import pytest
+
+    module = _load_colab()
+    (tmp_path / "deploy.yaml").write_text("Deploy: {}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="neither model.json nor model.pdmodel"):
+        module._inference_model_filename(tmp_path)
+
+
+def test_paddle_export_is_persisted_and_packaged_even_without_onnx():
+    module = _load_colab()
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "shutil.copytree(inference_dir, DRIVE_INFERENCE, dirs_exist_ok=True)" in source
+    assert 'DRIVE_INFERENCE.rglob("*")' in source
