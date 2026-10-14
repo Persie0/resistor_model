@@ -73,3 +73,31 @@ def test_color_eval_uses_same_paddleseg_normalization():
 
     np.testing.assert_array_equal(PADDLESEG_MEAN, [0.5, 0.5, 0.5])
     np.testing.assert_array_equal(PADDLESEG_STD, [0.5, 0.5, 0.5])
+
+
+def test_resume_keeps_better_existing_checkpoint(tmp_path: Path, monkeypatch):
+    module = _load_colab()
+    monkeypatch.setattr(module, "OUTPUT_LOCAL", tmp_path / "output")
+    best = module.OUTPUT_LOCAL / "best_model"
+    backup = tmp_path / "old-best"
+    best.mkdir(parents=True)
+    backup.mkdir()
+    (best / "model.pdparams").write_bytes(b"worse-model")
+    (backup / "model.pdparams").write_bytes(b"better-model")
+    monkeypatch.setattr(module, "_checkpoint_miou", lambda path: 0.8930)
+    module._keep_stronger_best_model(backup, previous_miou=0.8985)
+    assert (best / "model.pdparams").read_bytes() == b"better-model"
+
+
+def test_resume_keeps_improved_checkpoint(tmp_path: Path, monkeypatch):
+    module = _load_colab()
+    monkeypatch.setattr(module, "OUTPUT_LOCAL", tmp_path / "output")
+    best = module.OUTPUT_LOCAL / "best_model"
+    backup = tmp_path / "old-best"
+    best.mkdir(parents=True)
+    backup.mkdir()
+    (best / "model.pdparams").write_bytes(b"better-new-model")
+    (backup / "model.pdparams").write_bytes(b"old-model")
+    monkeypatch.setattr(module, "_checkpoint_miou", lambda path: 0.9100)
+    module._keep_stronger_best_model(backup, previous_miou=0.8985)
+    assert (best / "model.pdparams").read_bytes() == b"better-new-model"
