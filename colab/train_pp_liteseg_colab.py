@@ -42,7 +42,7 @@ import time
 import urllib.request
 import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-14-v16-converter-runtime-deps"
+PADDLESEG_COLAB_VERSION = "2026-10-14-v17-static-shape-onnx-export"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -833,11 +833,19 @@ def export_and_convert() -> Path | None:
         return None
     inference_dir = WORK / "inference"
     try:
+        # PP-LiteSeg uses adaptive pooling. Paddle2ONNX cannot translate its
+        # pd_op.pool2d with dynamic spatial dimensions [-1, 3, -1, -1].
+        # Export the exact 512x512 tensor used by mobile inference, previews
+        # and validation. No retraining or change to best_model is required.
+        export_shape = ["1", "3", str(IMAGE_SIZE), str(IMAGE_SIZE)]
+        print(f"[export] fixing input shape to NCHW={export_shape} "
+              "for Paddle2ONNX adaptive pooling", flush=True)
         run_with_heartbeat([
             sys.executable, str(PADDLESEG_DIR / "tools" / "export.py"),
             "--config", str(CUSTOM_CONFIG),
             "--model_path", str(best),
             "--save_dir", str(inference_dir),
+            "--input_shape", *export_shape,
         ], cwd=PADDLESEG_DIR, extra_env={"PYTHONPATH": str(PADDLESEG_DIR)})
     except subprocess.CalledProcessError as exc:
         (RUN_DIR / "export_error.txt").write_text(str(exc), encoding="utf-8")
@@ -846,7 +854,7 @@ def export_and_convert() -> Path | None:
 
     # Persist the native Paddle model even when ONNX conversion is not possible.
     shutil.copytree(inference_dir, DRIVE_INFERENCE, dirs_exist_ok=True)
-    print(f"[export] native Paddle inference model saved to {DRIVE_INFERENCE}", flush=True)
+    print(f"[export] fixed-shape Paddle inference model saved to {DRIVE_INFERENCE}", flush=True)
     try:
         model_filename = _inference_model_filename(inference_dir)
         converter = _converter_executable()
