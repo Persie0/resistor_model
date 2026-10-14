@@ -1,7 +1,7 @@
-"""Google Colab recipe: PP-LiteSeg-T whole-resistor segmentation (Apache-2.0).
+"""Google Colab recipe: PP-LiteSeg whole-resistor segmentation (Apache-2.0).
 
 Why this exists alongside ``train_resistor_segmentation_colab.py`` (torchvision
-LR-ASPP): PP-LiteSeg-T (STDC1 backbone + detail/attention decoder) is the best
+LR-ASPP): PP-LiteSeg (STDC2 backbone + detail/attention decoder) is a strong
 published speed/accuracy trade-off in the license-clean set, and its
 boundary-aware design suits thin resistor bodies. Single resistor per frame,
 so plain binary semantic segmentation is all the phone pipeline needs.
@@ -865,7 +865,7 @@ def evaluate_test(onnx_path: Path | None, dataset_root: Path) -> None:
 
 def summarize() -> None:
     summary = {
-        "model": "PP-LiteSeg-T (STDC1), binary, Apache-2.0 path",
+        "model": "PP-LiteSeg (STDC2), binary, Apache-2.0 path",
         "input": IMAGE_SIZE,
         "iters": ITERS,
         "synth_variants_train_only": list(SYNTH_VARIANTS),
@@ -1125,7 +1125,11 @@ def main() -> None:
         onnx_path = export_and_convert()
         summarize()
         package_and_download()
-        preview_uploaded_images(onnx_path)
+        try:
+            preview_uploaded_images(onnx_path)
+        except Exception as exc:
+            print(f"[preview] Optional upload test failed: {exc}", flush=True)
+            print(f"[preview] Training ZIP is already saved at {ZIP_PATH}", flush=True)
         return
     require_gpu()
     mount_drive()
