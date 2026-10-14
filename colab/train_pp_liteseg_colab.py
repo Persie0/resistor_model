@@ -908,7 +908,7 @@ def export_and_convert() -> Path | None:
 
     # Persist the native Paddle model even when ONNX conversion is not possible.
     shutil.copytree(inference_dir, DRIVE_INFERENCE, dirs_exist_ok=True)
-    print(f"[export] fixed-shape Paddle inference model saved to {DRIVE_INFERENCE}", flush=True)
+    print(f"[export] native Paddle inference model saved to {DRIVE_INFERENCE}", flush=True)
     try:
         model_filename = _inference_model_filename(inference_dir)
         converter = _converter_executable()
