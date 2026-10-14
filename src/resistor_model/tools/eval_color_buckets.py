@@ -19,6 +19,7 @@ thresholded at 0.5, two-channel logits are argmaxed, integer label maps are
 used directly. The PyTorch checkpoint path uses its dataset preprocessing. The ONNX path
 assumes PaddleSeg PP-LiteSeg RGB letterboxing and stock Normalize() defaults
 (mean/std=0.5), matching the PP-LiteSeg quick-start training configuration.
+Use --normalization imagenet for ONNX models trained with ImageNet statistics.
 """
 
 from __future__ import annotations
@@ -33,6 +34,8 @@ from PIL import Image
 
 PADDLESEG_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
 PADDLESEG_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 def bucket(h_deg: float, s: float) -> str:
@@ -128,16 +131,25 @@ def _to_pred01(output: np.ndarray) -> np.ndarray:
     raise ValueError(f"unsupported model output shape: {np.asarray(output).shape}")
 
 
-def evaluate_onnx(onnx_path: Path, pairs: list[tuple[Path, Path]], size: int) -> list[tuple[str, float]]:
+def evaluate_onnx(
+    onnx_path: Path, pairs: list[tuple[Path, Path]], size: int,
+    normalization: str = "paddleseg",
+) -> list[tuple[str, float]]:
     import onnxruntime as ort
 
+    if normalization not in ("paddleseg", "imagenet"):
+        raise ValueError(f"Unsupported normalization {normalization!r}")
+    mean, std = (
+        (PADDLESEG_MEAN, PADDLESEG_STD) if normalization == "paddleseg"
+        else (IMAGENET_MEAN, IMAGENET_STD)
+    )
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
     out: list[tuple[str, float]] = []
     for img_path, mask_path in pairs:
         with Image.open(img_path) as raw:
             rgb = letterbox_rgb(raw.convert("RGB"), size).astype(np.float32) / 255.0
-        tensor = ((rgb - PADDLESEG_MEAN) / PADDLESEG_STD).transpose(2, 0, 1)[None]
+        tensor = ((rgb - mean) / std).transpose(2, 0, 1)[None]
         pred = _to_pred01(session.run(None, {input_name: tensor})[0])
         if pred.shape != (size, size):
             pred = np.asarray(Image.fromarray(pred.astype(np.uint8) * 255).resize((size, size), Image.Resampling.NEAREST)) > 0
@@ -179,6 +191,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, help="PyTorch lraspp best.pt")
     parser.add_argument("--onnx", type=Path, help="Exported model (any framework)")
     parser.add_argument("--image-size", type=int, default=512)
+    parser.add_argument("--normalization", choices=("paddleseg", "imagenet"), default="paddleseg")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     if bool(args.checkpoint) == bool(args.onnx):
@@ -188,7 +201,7 @@ def main() -> None:
         pairs = _pairs_v4(args.dataset_root / args.split)
         if not pairs:
             raise ValueError(f"no v4 image/mask pairs under {args.dataset_root / args.split}")
-        scored = evaluate_onnx(args.onnx, pairs, int(args.image_size))
+        scored = evaluate_onnx(args.onnx, pairs, int(args.image_size), args.normalization)
     else:
         scored = evaluate_checkpoint(args.checkpoint, args.dataset_root, args.split, int(args.image_size))
 
