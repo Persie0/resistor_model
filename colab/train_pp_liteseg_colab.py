@@ -42,7 +42,7 @@ import time
 import urllib.request
 import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-14-v15-converter-deps-segbuilder"
+PADDLESEG_COLAB_VERSION = "2026-10-14-v16-converter-runtime-deps"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -741,12 +741,19 @@ def train(config: Path, dataset_source: str) -> None:
 def _converter_executable() -> Path | None:
     """Ensure a working isolated Python 3.12 Paddle2ONNX CLI.
 
-    Paddle2ONNX 2.1.0 imports packaging but doesn't declare it as a dependency.
-    Repair the previously created venv in-place rather than redownloading Paddle.
+    Paddle2ONNX 2.1.0 imports packaging without declaring it as a dependency.
+    PaddlePaddle 3.1.1 also imports setuptools while starting up. Both are
+    absent from uv-created virtualenvs unless explicitly installed.
+    Repair the existing converter in place without redownloading Paddle.
     Colab Python 3.13 and the trained checkpoint are never modified.
     """
     binary = CONVERTER_VENV / "bin" / "paddle2onnx"
     venv_python = CONVERTER_VENV / "bin" / "python"
+    runtime_deps = [
+        "packaging>=23,<27",
+        "setuptools>=68",
+        "wheel>=0.42",
+    ]
 
     def check_cli() -> tuple[bool, str]:
         if not binary.is_file():
@@ -779,14 +786,11 @@ def _converter_executable() -> Path | None:
                 sys.executable, "-m", "uv", "venv", "--python", "3.12",
                 str(CONVERTER_VENV),
             ], heartbeat_seconds=60)
-            requirements = [
-                "paddlepaddle==3.1.1", "paddle2onnx==2.1.0",
-                "packaging>=23,<27",
-            ]
+            requirements = ["paddlepaddle==3.1.1", "paddle2onnx==2.1.0", *runtime_deps]
         else:
-            # The already-installed converter worked up to import packaging.
-            # Install only its undeclared dependency; do not reinstall Paddle.
-            requirements = ["packaging>=23,<27"]
+            # Repair the already-installed Python 3.12 environment without
+            # reinstalling the large paddlepaddle and paddle2onnx wheels.
+            requirements = runtime_deps
 
         run_with_heartbeat([
             sys.executable, "-m", "uv", "pip", "install",
