@@ -42,7 +42,7 @@ import time
 import urllib.request
 import zipfile
 
-PADDLESEG_COLAB_VERSION = "2026-10-14-v14-py312-conversion-preview-fix"
+PADDLESEG_COLAB_VERSION = "2026-10-14-v15-converter-deps-segbuilder"
 PADDLESEG_REPO = "https://github.com/PaddlePaddle/PaddleSeg.git"
 PADDLESEG_BRANCH = "release/2.10"
 # NOTE: `paddlepaddle-gpu` on default PyPI stops at 2.6.x (no Python 3.13
@@ -739,36 +739,76 @@ def train(config: Path, dataset_source: str) -> None:
 
 
 def _converter_executable() -> Path | None:
-    """Use isolated Python 3.12 wheels: Paddle2ONNX/ONNX lack cp313 wheels.
+    """Ensure a working isolated Python 3.12 Paddle2ONNX CLI.
 
-    Keep the working Colab Python 3.13 + CUDA Paddle installation untouched.
-    uv installs its own managed Python 3.12 when the runtime lacks one.
+    Paddle2ONNX 2.1.0 imports packaging but doesn't declare it as a dependency.
+    Repair the previously created venv in-place rather than redownloading Paddle.
+    Colab Python 3.13 and the trained checkpoint are never modified.
     """
     binary = CONVERTER_VENV / "bin" / "paddle2onnx"
-    if binary.is_file():
-        return binary
-    print("[onnx] Paddle2ONNX 2.1.0 + ONNX 1.17 have Python 3.12 wheels, "
-          "but not Python 3.13 wheels; creating separate 3.12 converter.", flush=True)
-    try:
-        # uv itself has cp313 wheels and can install a standalone CPython 3.12.
-        _pip_install(["-q", "uv"], description="uv for isolated ONNX converter")
-        run_with_heartbeat([
-            sys.executable, "-m", "uv", "venv", "--python", "3.12", str(CONVERTER_VENV),
-        ], heartbeat_seconds=60)
-        run_with_heartbeat([
-            sys.executable, "-m", "uv", "pip", "install", "--python",
-            str(CONVERTER_VENV / "bin" / "python"),
-            "paddlepaddle==3.1.1", "paddle2onnx==2.1.0",
-        ], heartbeat_seconds=60)
+    venv_python = CONVERTER_VENV / "bin" / "python"
+
+    def check_cli() -> tuple[bool, str]:
         if not binary.is_file():
-            raise RuntimeError(f"Converter executable missing after installation: {binary}")
+            return False, "converter executable is absent"
+        try:
+            check = subprocess.run(
+                [str(binary), "--version"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
+        detail = (check.stdout + "\n" + check.stderr).strip()
+        return check.returncode == 0, detail
+
+    healthy, detail = check_cli()
+    if healthy:
+        print(f"[onnx] existing Python 3.12 converter ready: {binary}", flush=True)
+        return binary
+
+    if binary.is_file():
+        print(f"[onnx] repairing existing converter environment: {detail[-1200:]}", flush=True)
+    else:
+        print("[onnx] creating isolated Python 3.12 environment "
+              "(Paddle2ONNX 2.1.0 has no Python 3.13 wheel)", flush=True)
+
+    try:
+        _pip_install(["-q", "uv"], description="uv for isolated ONNX converter")
+        if not binary.is_file():
+            run_with_heartbeat([
+                sys.executable, "-m", "uv", "venv", "--python", "3.12",
+                str(CONVERTER_VENV),
+            ], heartbeat_seconds=60)
+            requirements = [
+                "paddlepaddle==3.1.1", "paddle2onnx==2.1.0",
+                "packaging>=23,<27",
+            ]
+        else:
+            # The already-installed converter worked up to import packaging.
+            # Install only its undeclared dependency; do not reinstall Paddle.
+            requirements = ["packaging>=23,<27"]
+
+        run_with_heartbeat([
+            sys.executable, "-m", "uv", "pip", "install",
+            "--python", str(venv_python), *requirements,
+        ], heartbeat_seconds=60)
+
+        healthy, detail = check_cli()
+        if not healthy:
+            raise RuntimeError(
+                "Paddle2ONNX startup check still fails after dependency repair:\n"
+                + detail[-2500:]
+            )
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         (RUN_DIR / "onnx_setup_error.txt").write_text(
-            f"Python 3.12 converter install failed: {exc}\n", encoding="utf-8"
+            f"Python 3.12 converter install/repair failed: {exc}\n", encoding="utf-8"
         )
-        print(f"[onnx] converter setup failed: {exc}. PaddleSeg inference saved.", flush=True)
+        print(f"[onnx] converter setup failed: {exc}. Native Paddle export is safe.", flush=True)
         return None
+
+    print(f"[onnx] Paddle2ONNX startup check passed: {detail[-400:]}", flush=True)
     return binary
+
 
 
 def _inference_model_filename(inference_dir: Path) -> str:
@@ -1014,11 +1054,12 @@ def _load_preview_predictor(onnx_path: Path | None):
     if str(PADDLESEG_DIR) not in sys.path:
         sys.path.insert(0, str(PADDLESEG_DIR))
     import paddle
-    from paddleseg.cvlibs import Config
+    from paddleseg.cvlibs import Config, SegBuilder
     from paddleseg.utils import utils
 
     config = Config(str(CUSTOM_CONFIG))
-    model = config.model
+    # PaddleSeg 2.10 exposes model construction on SegBuilder, NOT Config.
+    model = SegBuilder(config).model
     utils.load_entire_model(model, str(checkpoint))
     model.eval()
     print(f"[preview] testing PaddleSeg checkpoint: {checkpoint}", flush=True)
