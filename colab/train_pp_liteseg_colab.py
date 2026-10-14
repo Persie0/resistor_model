@@ -826,7 +826,7 @@ def _letterbox_preview_input(image: "Image.Image") -> "np.ndarray":
     new_width = max(1, round(width * scale))
     new_height = max(1, round(height * scale))
     scaled = image.resize((new_width, new_height), Image.Resampling.BILINEAR)
-    canvas = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE, (128, 128, 128))
+    canvas = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), (128, 128, 128))
     canvas.paste(scaled, ((IMAGE_SIZE - new_width) // 2, (IMAGE_SIZE - new_height) // 2))
     rgb = np.asarray(canvas, dtype=np.float32) / 255.0
     # Stock PaddleSeg quick-start uses Normalize() with 0.5 mean/std, not ImageNet.
