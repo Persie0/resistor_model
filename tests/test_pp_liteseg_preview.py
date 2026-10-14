@@ -166,6 +166,8 @@ def test_existing_converter_missing_packaging_is_repaired_without_reinstalling_p
     assert installed == [["-q", "uv"]]
     assert len(commands) == 1
     assert "packaging>=23,<27" in commands[0]
+    assert "setuptools>=68" in commands[0]
+    assert "wheel>=0.42" in commands[0]
     assert "paddlepaddle==3.1.1" not in commands[0]
     assert "paddle2onnx==2.1.0" not in commands[0]
 
@@ -243,3 +245,32 @@ def test_paddleseg_checkpoint_preview_builds_model_via_segbuilder(tmp_path, monk
     assert callable(predictor)
     assert recorded == [str(checkpoint)]
     assert predictor(np.ones((1, 2, 8, 8))).shape == (1, 2, 8, 8)
+
+
+
+def test_existing_converter_missing_setuptools_repairs_all_runtime_dependencies(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    module = _load_colab()
+    venv = tmp_path / "py312"
+    binary = venv / "bin" / "paddle2onnx"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!fake", encoding="utf-8")
+    monkeypatch.setattr(module, "CONVERTER_VENV", venv)
+    monkeypatch.setattr(module, "_pip_install", lambda args, description: None)
+    commands = []
+    monkeypatch.setattr(
+        module, "run_with_heartbeat",
+        lambda args, **kwargs: commands.append(args),
+    )
+    calls = iter([
+        SimpleNamespace(returncode=1, stdout="", stderr="ModuleNotFoundError: No module named 'setuptools'"),
+        SimpleNamespace(returncode=0, stdout="paddle2onnx 2.1.0", stderr=""),
+    ])
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: next(calls))
+
+    assert module._converter_executable() == binary
+    assert len(commands) == 1
+    assert set(("packaging>=23,<27", "setuptools>=68", "wheel>=0.42")).issubset(set(commands[0]))
+    assert "paddlepaddle==3.1.1" not in commands[0]
+    assert "paddle2onnx==2.1.0" not in commands[0]
