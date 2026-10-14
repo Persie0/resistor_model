@@ -817,7 +817,7 @@ def _foreground_mask_from_output(output: object) -> "np.ndarray":
 
 
 def _letterbox_preview_input(image: "Image.Image") -> "np.ndarray":
-    """Exactly match the existing ONNX test evaluator's RGB letterboxing/normalization."""
+    """Match PaddleSeg Normalize() defaults and the ONNX test evaluator."""
     import numpy as np
     from PIL import Image
 
@@ -829,8 +829,9 @@ def _letterbox_preview_input(image: "Image.Image") -> "np.ndarray":
     canvas = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE))
     canvas.paste(scaled, ((IMAGE_SIZE - new_width) // 2, (IMAGE_SIZE - new_height) // 2))
     rgb = np.asarray(canvas, dtype=np.float32) / 255.0
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    # Stock PaddleSeg quick-start uses Normalize() with 0.5 mean/std, not ImageNet.
+    mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+    std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
     return ((rgb - mean) / std).transpose(2, 0, 1)[None].astype(np.float32)
 
 
