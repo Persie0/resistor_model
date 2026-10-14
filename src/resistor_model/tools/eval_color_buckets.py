@@ -59,7 +59,7 @@ def letterbox_rgb(img: Image.Image, size: int) -> np.ndarray:
     scale = min(size / w, size / h)
     nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
     img = img.resize((nw, nh), Image.Resampling.BILINEAR)
-    canvas = Image.new("RGB", (size, size))
+    canvas = Image.new("RGB", (size, size, (128, 128, 128))
     canvas.paste(img, ((size - nw) // 2, (size - nh) // 2))
     return np.asarray(canvas)
 
