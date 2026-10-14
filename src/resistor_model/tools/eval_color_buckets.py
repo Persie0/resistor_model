@@ -16,8 +16,9 @@ needed for statistics) and reports IoU overall + per bucket:
 Works with a PyTorch LR-ASPP ``best.pt`` (``--checkpoint``) or ANY exported
 ``--onnx`` (e.g. PaddleSeg PP-LiteSeg): single-channel float masks are
 thresholded at 0.5, two-channel logits are argmaxed, integer label maps are
-used directly. Both paths assume ImageNet-normalized RGB letterboxed input,
-which is what this repo and the PaddleSeg recipe both use.
+used directly. The PyTorch checkpoint path uses its dataset preprocessing. The ONNX path
+assumes PaddleSeg PP-LiteSeg RGB letterboxing and stock Normalize() defaults
+(mean/std=0.5), matching the PP-LiteSeg quick-start training configuration.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+PADDLESEG_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+PADDLESEG_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
 
 
 def bucket(h_deg: float, s: float) -> str:
@@ -136,7 +137,7 @@ def evaluate_onnx(onnx_path: Path, pairs: list[tuple[Path, Path]], size: int) ->
     for img_path, mask_path in pairs:
         with Image.open(img_path) as raw:
             rgb = letterbox_rgb(raw.convert("RGB"), size).astype(np.float32) / 255.0
-        tensor = ((rgb - IMAGENET_MEAN) / IMAGENET_STD).transpose(2, 0, 1)[None]
+        tensor = ((rgb - PADDLESEG_MEAN) / PADDLESEG_STD).transpose(2, 0, 1)[None]
         pred = _to_pred01(session.run(None, {input_name: tensor})[0])
         if pred.shape != (size, size):
             pred = np.asarray(Image.fromarray(pred.astype(np.uint8) * 255).resize((size, size), Image.Resampling.NEAREST)) > 0
