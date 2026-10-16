@@ -191,8 +191,46 @@ def new_colors(rng: np.random.Generator, n: int) -> list[str]:
     return result
 
 
+def collect_real_band_donors(records, *, max_per_color: int = 48):
+    """Collect real color-band textures from TRAIN photos only.
+
+    These are not extra synthetic image labels: they're texture patches from
+    annotated training bands, never val/test. Their hue variation/specular
+    structure is pasted onto other training resistor bodies and blended with
+    the palette-based stripe simulation.
+    """
+    donors = {color: [] for color in COLORS}
+    for rel, annotation, split in records:
+        if split != "train":
+            continue
+        if all(len(donors[k]) >= max_per_color for k in COLORS):
+            break
+        image = cv2.imread(str(INPUT_ROOT / rel), cv2.IMREAD_COLOR)
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        for band in annotation.bands:
+            if band.color not in donors or len(donors[band.color]) >= max_per_color:
+                continue
+            x1,y1,x2,y2 = [int(round(v)) for v in band.bbox]
+            x1,x2 = max(0,x1), min(w,x2)
+            y1,y2 = max(0,y1), min(h,y2)
+            if x2-x1 < 3 or y2-y1 < 3:
+                continue
+            patch = image[y1:y2,x1:x2].copy()
+            # Remove annotated-box edge pixels, which may contain body color.
+            ph,pw = patch.shape[:2]
+            patch = patch[max(0,ph//8):max(1,ph-ph//8),
+                          max(0,pw//8):max(1,pw-pw//8)]
+            if patch.size:
+                donors[band.color].append(patch)
+    print("[donors] real TRAIN band textures: " +
+          ", ".join(f"{c}={len(v)}" for c,v in donors.items()),flush=True)
+    return donors
+
+
 def repaint_bands(image: np.ndarray, mask: np.ndarray, boxes: list, names: list[str],
-                  rng: np.random.Generator) -> tuple[np.ndarray, list]:
+                  rng: np.random.Generator, donor_bank=None) -> tuple[np.ndarray, list]:
     """Remove source bands, paint *plausible textured* replacements inside the body."""
     h,w=image.shape[:2]
     u=_long_axis(boxes)
@@ -228,6 +266,23 @@ def repaint_bands(image: np.ndarray, mask: np.ndarray, boxes: list, names: list[
         local=float(np.median(gray[region]))
         luminance=np.clip(0.50+0.50*gray/(local+1),0.35,1.6)
         target=np.clip(base[None,None,:]*luminance[...,None],0,255)
+        # A donor band of this color brings actual photographic stripe texture,
+        # while the palette's luminance adjustment retains target-body shading.
+        candidates=(donor_bank or {}).get(name,[])
+        if candidates:
+            patch=candidates[int(rng.integers(len(candidates)))]
+            ypix,xpix=np.where(region)
+            x0,x1=int(xpix.min()),int(xpix.max()+1)
+            y0,y1=int(ypix.min()),int(ypix.max()+1)
+            donor=cv2.resize(patch,(x1-x0,y1-y0),interpolation=cv2.INTER_LINEAR)
+            donor=donor.astype(np.float32)
+            donor_lum=cv2.cvtColor(donor.astype(np.uint8),cv2.COLOR_BGR2GRAY)
+            adjustment=np.clip(float(np.median(gray[region]))/
+                               max(float(np.median(donor_lum)),1.0),0.55,1.65)
+            blended=np.clip(donor*adjustment,0,255)
+            target[y0:y1,x0:x1] = (
+                target[y0:y1,x0:x1]*.30+blended*.70
+            )
         feather=np.clip((stripe_width*.5-np.abs(projected-center))/max(stripe_width*.14,1),0,1)
         alpha=(region*feather*rng.uniform(.87,.99)).astype(np.float32)[...,None]
         output=np.clip(output.astype(np.float32)*(1-alpha)+target*alpha,0,255).astype(np.uint8)
@@ -294,7 +349,7 @@ def _horizontal_crop(image:np.ndarray,mask:np.ndarray,boxes:list):
 
 def process_variant(segmenter:Segmenter,source:np.ndarray,source_boxes:list,
                     source_names:list[str],rng:np.random.Generator,synthetic:bool,
-                    count:int|None=None):
+                    count:int|None=None,donor_bank=None):
     initial=segmenter.mask(source)
     # Source annotation and selected segmentation must overlap; reject
     # multi-resistor crops where segmenter picked the wrong object.
@@ -310,7 +365,7 @@ def process_variant(segmenter:Segmenter,source:np.ndarray,source_boxes:list,
     names=source_names
     if synthetic:
         names=new_colors(rng,int(count))
-        image, labels=repaint_bands(source,initial,boxes,names,rng)
+        image, labels=repaint_bands(source,initial,boxes,names,rng,donor_bank=donor_bank)
         boxes=[b["bbox"] for b in labels]
     image,expected,boxes=_warp(image,initial,boxes,rng,active=synthetic)
     predicted=segmenter.mask(image)
@@ -345,7 +400,7 @@ def read_sources(manifest:Path,splits:Path):
     return records
 
 
-def process_shard(segmenter, records, shard_index, shard_dir:Path, seed=42):
+def process_shard(segmenter, records, shard_index, shard_dir:Path, seed=42, donor_bank=None):
     shard_dir.mkdir(parents=True,exist_ok=True)
     image_root=shard_dir/"images";image_root.mkdir(exist_ok=True)
     rng=np.random.default_rng(seed+shard_index)
@@ -371,6 +426,7 @@ def process_shard(segmenter, records, shard_index, shard_dir:Path, seed=42):
             try:
                 crop,bands,iou=process_variant(
                     segmenter,roi,boxes,originals,rng,synthetic=n is not None,count=n,
+                    donor_bank=donor_bank,
                 )
                 rel_file=f"images/{name}.jpg"
                 cv2.imwrite(str(shard_dir/rel_file),crop,[cv2.IMWRITE_JPEG_QUALITY,94])
@@ -441,6 +497,8 @@ def prepare(segmenter:Segmenter,max_sources:int|None=None):
             "max_sources":max_sources}
     remote=DRIVE_ROOT/"shards";remote.mkdir(parents=True,exist_ok=True)
     started=time.monotonic()
+    # Optional train-only donor textures; val/test cannot become donor sources.
+    donor_bank=collect_real_band_donors(source)
     for index,at in enumerate(range(0,len(source),SHARD_SIZE)):
         dst=remote/f"shard_{index:04d}.zip"
         if valid_shard(dst,recipe):
@@ -449,7 +507,7 @@ def prepare(segmenter:Segmenter,max_sources:int|None=None):
         root=WORK_ROOT/f"shard_{index:04d}"
         if root.exists():shutil.rmtree(root)
         print(f"[shard {index:04d}] generating {min(SHARD_SIZE,len(source)-at)} sources",flush=True)
-        process_shard(segmenter,source[at:at+SHARD_SIZE],index,root)
+        process_shard(segmenter,source[at:at+SHARD_SIZE],index,root,donor_bank=donor_bank)
         archive_shard(root,dst,recipe)
         shutil.rmtree(root)
         print(f"[shard {index:04d}] saved {dst.stat().st_size/1048576:.1f} MiB "
