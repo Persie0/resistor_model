@@ -110,23 +110,78 @@ DATASET_FINGERPRINT = {
 }
 
 
-def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
-    print("+", " ".join(cmd), flush=True)
+def run(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    capture: bool = False,
+    heartbeat_seconds: float | None = None,
+) -> str:
+    """Stream child output; print keepalives if training becomes silent."""
+    print("+", " ".join(map(str, cmd)), flush=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     process = subprocess.Popen(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=1,
+        cmd, cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=env,
     )
     assert process.stdout is not None
     captured: list[str] = []
-    for line in process.stdout:
-        print(line, end="", flush=True)
-        if capture:
-            captured.append(line)
-    return_code = process.wait()
+
+    if heartbeat_seconds is None:
+        for line in process.stdout:
+            print(line, end="" if line.endswith("\n") else "\n", flush=True)
+            if capture:
+                captured.append(line)
+        return_code = process.wait()
+    else:
+        events: queue.Queue[str | None] = queue.Queue()
+
+        def pump_stdout() -> None:
+            try:
+                for line in process.stdout:
+                    events.put(line)
+            finally:
+                events.put(None)
+
+        thread = threading.Thread(target=pump_stdout, name="mobile1d-log", daemon=True)
+        thread.start()
+        started = last_report = time.monotonic()
+        heartbeat = max(1.0, float(heartbeat_seconds))
+        try:
+            while True:
+                try:
+                    line = events.get(timeout=min(1.0, heartbeat))
+                except queue.Empty:
+                    line = ""
+                if line is None:
+                    break
+                if line:
+                    print(line, end="" if line.endswith("\n") else "\n", flush=True)
+                    if capture:
+                        captured.append(line)
+                    last_report = time.monotonic()
+                now = time.monotonic()
+                if now - last_report >= heartbeat:
+                    print(
+                        f"[heartbeat] PID {process.pid} running | "
+                        f"elapsed {now - started:.0f}s | "
+                        f"no stdout for {now - last_report:.0f}s",
+                        flush=True,
+                    )
+                    last_report = now
+            return_code = process.wait()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            process.stdout.close()
+            thread.join(timeout=1)
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, cmd)
     return "".join(captured)
