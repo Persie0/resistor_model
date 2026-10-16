@@ -81,6 +81,9 @@ def test_result_zip_does_not_embed_drive_training_cache(monkeypatch, tmp_path: P
 def test_mobile1d_checkpoint_frequency_is_opt_in(tmp_path: Path):
     cfg = colab.build_config(tmp_path / "run", None, None)
     assert cfg["train"]["checkpoint_every"] == 5
+    assert cfg["train"]["epochs"] == 120
+    assert cfg["train"]["lr_initial_cycle_epochs"] == 60
+    assert cfg["train"]["lr_extension_peak_factor"] == 0.20
     assert cfg["train"]["resume"] is None
 
 
