@@ -67,6 +67,15 @@ class Segmenter:
             )
         self.path = model_path
         self.sha = sha256(model_path)
+        metadata = model_path.with_suffix(model_path.suffix + ".json")
+        if metadata.is_file():
+            meta = json.loads(metadata.read_text(encoding="utf-8"))
+            if meta.get("architecture") != "lraspp_mobilenet_v3_large":
+                raise ValueError(
+                    "The preprocessor supports LR-ASPP only; "
+                    f"found segmentation architecture {meta.get('architecture')!r}. "
+                    "Do not treat a PP-LiteSeg model as ImageNet-normalized LR-ASPP."
+                )
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
         self.session = ort.InferenceSession(str(model_path), providers=providers)
         print(f"[segmenter] ONNX Runtime providers: {self.session.get_providers()}", flush=True)
