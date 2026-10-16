@@ -19,6 +19,7 @@ Two Google Colab notebooks implement the full **data synthesis → deployed segm
 - Rotated/sheared/scale-jittered synthetic scenes are processed by the SAME trained segmenter as real images. A segmenter mask's inferred long axis determines the final horizontal crop; transformed band annotations are carried into that 176×512 crop.
 - The segmenter is also run on each original photograph. Grossly mismatched segmentation masks are rejected and counted instead of labeled as if they were correct.
 - Real validation/test photos **never get synthetic variants**. Source physical resistor IDs and capture groups retain their original split.
+- **Count-balanced epoch sampling:** although two six-band variants are generated per training source, the reader training sampler targets 4% three-band, 65% four-band, 18% five-band and 13% six-band examples. This prevents the synthesized six-band majority from dominating band-count predictions.
 
 ## Caching / resumability
 
