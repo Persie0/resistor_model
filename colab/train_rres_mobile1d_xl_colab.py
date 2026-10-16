@@ -97,6 +97,19 @@ def configure_xl(base) -> None:
 
     base.install_dependencies = install_and_check_capacity
 
+    original_train = base.train_and_evaluate
+
+    def train_checked_xl():
+        # Validate this exact architecture, cache separation and compact ZIP
+        # before spending GPU hours on the XL experiment.
+        base.run([
+            base.sys.executable, "-m", "pytest", "-q",
+            "tests/test_mobile1d_xl_colab.py",
+        ], cwd=base.MODEL_REPO, heartbeat_seconds=base.HEARTBEAT_SECONDS)
+        original_train()
+
+    base.train_and_evaluate = train_checked_xl
+
     # Recovery snapshots remain on Drive, but the browser ZIP excludes them
     # to avoid packaging gigabytes of redundant XL optimizer/EMA states.
     original_package = base.package_and_download
