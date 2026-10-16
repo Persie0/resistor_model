@@ -38,7 +38,7 @@ def configure_segmented_training(base, xl):
         # already underwent rotation/shear BEFORE their segmenter pass.
         config["data"]["geometric_augment"] = True
         config["data"]["jitter_strength"] = 0.0
-        config["train"]["data_recipe"] = "r1-segsynthetic-lraspp-bandlabels-v1"
+        config["train"]["data_recipe"] = "r1-segsynthetic-lraspp-donor-bands-v2"
         return config
 
     base.build_config = segmented_config
