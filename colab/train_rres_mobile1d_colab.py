@@ -744,7 +744,7 @@ def summarize() -> None:
     print(json.dumps(summary, indent=2), flush=True)
 
 
-def package_and_download(*, download: bool = True) -> None:
+def package_and_download(*, download: bool = True, include_recovery_snapshots: bool = True) -> None:
     """Pack model/results only; prepared training data stays in Drive cache."""
     ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
     ZIP_PATH.unlink(missing_ok=True)
@@ -753,6 +753,7 @@ def package_and_download(*, download: bool = True) -> None:
         path for path in RUN_DIR.rglob("*")
         if path.is_file()
         and not any(part in excluded_parts for part in path.relative_to(RUN_DIR).parts)
+        and (include_recovery_snapshots or "checkpoints" not in path.relative_to(RUN_DIR).parts)
         and not path.name.startswith("prepared_dataset.")
         and not path.name.endswith((".partial", ".tmp"))
     )
