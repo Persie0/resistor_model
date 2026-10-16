@@ -29,6 +29,7 @@ def main() -> None:
         manifest, root, allowed_resistor_ids=ids,
         output_size=tuple(cfg["data"]["output_size"]), sequence_bins=cfg["data"]["sequence_bins"],
         max_bands=cfg["model"]["max_bands"], augment=False,
+        pre_rectified=bool(cfg["data"].get("pre_rectified", False)),
     )
     if not ds:
         raise ValueError(f"{args.split} split is empty")
