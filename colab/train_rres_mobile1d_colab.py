@@ -675,29 +675,52 @@ def summarize() -> None:
 
 
 def package_and_download() -> None:
-    if ZIP_PATH.exists():
-        ZIP_PATH.unlink()
-    archive_base = ZIP_PATH.with_suffix("")
-    shutil.make_archive(str(archive_base), "zip", root_dir=RUN_DIR)
-    print(f"Created {ZIP_PATH} ({ZIP_PATH.stat().st_size / 1024 / 1024:.1f} MiB)", flush=True)
+    """Pack model/results only; prepared training data stays in Drive cache."""
+    ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ZIP_PATH.unlink(missing_ok=True)
+    excluded_parts = {"archives", "dataset", "tflite_tmp"}
+    files = sorted(
+        path for path in RUN_DIR.rglob("*")
+        if path.is_file()
+        and not any(part in excluded_parts for part in path.relative_to(RUN_DIR).parts)
+        and not path.name.startswith("prepared_dataset.")
+        and not path.name.endswith((".partial", ".tmp"))
+    )
+    print(f"[package] packing {len(files)} result files (dataset cache excluded)", flush=True)
+    with zipfile.ZipFile(
+        ZIP_PATH, "w", compression=zipfile.ZIP_DEFLATED,
+        compresslevel=1, allowZip64=True,
+    ) as archive:
+        for index, path in enumerate(files, 1):
+            archive.write(path, arcname=path.relative_to(RUN_DIR).as_posix())
+            if index == len(files) or index % 10 == 0:
+                print(f"[package] {index}/{len(files)} files", flush=True)
+    print(f"[package] ready {ZIP_PATH.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
     try:
         from google.colab import files
         files.download(str(ZIP_PATH))
-    except Exception:
-        print("Output remains persistently available at", RUN_DIR, flush=True)
+    except Exception as exc:
+        print(f"[package] browser download unavailable: {exc}", flush=True)
+        print(f"[package] persistent outputs remain at {RUN_DIR}", flush=True)
 
 
 def main() -> None:
+    print(f"[mobile1d] Colab version {MOBILE1D_COLAB_VERSION}", flush=True)
     require_gpu()
     mount_drive()
     clone_training_repo()
     install_dependencies()
-    download_release_datasets()
+    print("[stage 1/5] preparing/restoring training dataset", flush=True)
     prepare_dataset()
+    print("[stage 2/5] checking checkpoint and configuration", flush=True)
     write_config()
+    print("[stage 3/5] training, evaluation, conversion", flush=True)
     train_and_evaluate()
+    print("[stage 4/5] training metrics summary", flush=True)
     summarize()
+    print("[stage 5/5] packaging exports and checkpoints", flush=True)
     package_and_download()
+    print(f"[mobile1d] complete | persistent files: {RUN_DIR}", flush=True)
 
 
 if __name__ == "__main__":
