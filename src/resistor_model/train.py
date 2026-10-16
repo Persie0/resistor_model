@@ -71,6 +71,70 @@ def _advance_scheduler_for_checkpoint(scheduler) -> dict:
     return scheduler.state_dict()
 
 
+def _learning_rate_multiplier(
+    epoch: int,
+    *,
+    epochs: int,
+    warmup: int,
+    initial_cycle_epochs: int | None = None,
+    extension_peak_factor: float = 0.2,
+) -> float:
+    """LambdaLR factor for a full run or backward-compatible 60+60 extension.
+
+    Old checkpoints had a 60-epoch warmup/cosine cycle. Preserve that curve
+    exactly for epochs 1-60, then run a lower-peak second cosine cycle. Other
+    training configs continue to use their unchanged single-cycle schedule.
+    """
+    if initial_cycle_epochs is not None:
+        initial = int(initial_cycle_epochs)
+        if initial <= 0 or initial >= epochs:
+            raise ValueError("lr_initial_cycle_epochs must be between 1 and epochs-1")
+        if not 0 < extension_peak_factor <= 1:
+            raise ValueError("lr_extension_peak_factor must be in (0, 1]")
+        if epoch >= initial:
+            span = max(epochs - initial, 1)
+            progress = min(max((epoch - initial) / span, 0.0), 1.0)
+            return extension_peak_factor * 0.5 * (1.0 + math.cos(math.pi * progress))
+        cycle_epochs = initial
+    else:
+        cycle_epochs = epochs
+
+    if warmup > 0 and epoch < warmup:
+        return (epoch + 1) / warmup
+    span = max(cycle_epochs - warmup, 1)
+    progress = min(max((epoch - warmup) / span, 0.0), 1.0)
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def _align_resumed_extension_learning_rate(
+    *, optimizer, scheduler, checkpoint: dict, start_epoch: int, config: dict,
+) -> bool:
+    """Repair an old 60-epoch scheduler's zero LR on resuming at epoch 61.
+
+    This is only necessary if a previous run actually completed its shorter
+    planned schedule. Ordinary resumes leave optimizer/scheduler untouched.
+    """
+    train = config["train"]
+    phase = train.get("lr_initial_cycle_epochs")
+    if phase is None:
+        return False
+    previous_epochs = int(checkpoint.get("config", {}).get("train", {}).get("epochs", 0))
+    phase = int(phase)
+    if not (0 < previous_epochs <= phase <= start_epoch < int(train["epochs"])):
+        return False
+    multiplier = _learning_rate_multiplier(
+        start_epoch,
+        epochs=int(train["epochs"]),
+        warmup=int(train["warmup_epochs"]),
+        initial_cycle_epochs=phase,
+        extension_peak_factor=float(train.get("lr_extension_peak_factor", 0.2)),
+    )
+    for group, base in zip(optimizer.param_groups, scheduler.base_lrs, strict=True):
+        group["lr"] = float(base) * multiplier
+    scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
+    return True
+
+
 def _atomic_torch_save(obj, path: str | Path) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -510,14 +574,23 @@ def main() -> None:
     epochs = 1 if args.smoke else int(cfg["train"]["epochs"])
     warmup = min(int(cfg["train"]["warmup_epochs"]), max(epochs - 1, 0))
 
+    phase = cfg["train"].get("lr_initial_cycle_epochs")
+    peak_factor = float(cfg["train"].get("lr_extension_peak_factor", 0.2))
+
     def lr_lambda(epoch: int) -> float:
-        if warmup > 0 and epoch < warmup:
-            return (epoch + 1) / warmup
-        span = max(epochs - warmup, 1)
-        progress = min(max((epoch - warmup) / span, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        return _learning_rate_multiplier(
+            epoch, epochs=epochs, warmup=warmup,
+            initial_cycle_epochs=int(phase) if phase is not None else None,
+            extension_peak_factor=peak_factor,
+        )
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    if phase is not None:
+        _print_status(
+            f"[lr] first cycle 1-{phase} retains original schedule; "
+            f"extension {int(phase) + 1}-{epochs} starts at "
+            f"{peak_factor * float(cfg['train']['lr']):.3e} LR"
+        )
     scaler = torch.amp.GradScaler(
         "cuda", enabled=bool(cfg["train"]["amp"]) and device.type == "cuda"
     )
@@ -542,6 +615,15 @@ def main() -> None:
             float(checkpoint.get("best_exact_sequence", -1.0)),
             float(checkpoint.get("best_macro_f1", -1.0)),
         )
+        if _align_resumed_extension_learning_rate(
+            optimizer=optimizer, scheduler=scheduler, checkpoint=checkpoint,
+            start_epoch=start_epoch, config=cfg,
+        ):
+            _print_status(
+                f"[resume] extended an old {checkpoint['config']['train']['epochs']}-epoch "
+                f"checkpoint; using low-LR phase 2 at "
+                f"{optimizer.param_groups[0]['lr']:.3e}"
+            )
 
     if resume:
         _print_status(f"[resume] checkpoint restored | completed {start_epoch}/{epochs} epochs")
