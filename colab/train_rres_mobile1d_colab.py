@@ -672,6 +672,7 @@ def train_and_evaluate() -> None:
         sys.executable, "-m", "pytest", "-q",
         "tests/test_mobile1d.py",
         "tests/test_mobile1d_colab_cache.py",
+        "tests/test_training_lr_extension.py",
         "tests/test_progress.py",
         "tests/test_roboflow_coco_import.py",
         "tests/test_data_core.py",
