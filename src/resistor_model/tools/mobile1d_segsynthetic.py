@@ -40,7 +40,7 @@ TEMPCOS = ("brown", "red", "orange", "yellow", "blue", "violet")
 SHARD_SIZE = 120
 SYNTH_PER_TRAIN = 3
 MIN_MASK_IOU = 0.42
-RECIPE = "r1-segsynthetic-lraspp-bandlabels-v1"
+RECIPE = "r1-segsynthetic-lraspp-donor-bands-v2"
 INPUT_ROOT = Path("/content/resistor_training/r1_datasets")
 WORK_ROOT = Path("/content/mobile1d_segsynthetic")
 DRIVE_ROOT = Path("/content/drive/MyDrive/resistor_model/mobile1d-segsynthetic-data")
@@ -200,10 +200,12 @@ def collect_real_band_donors(records, *, max_per_color: int = 48):
     the palette-based stripe simulation.
     """
     donors = {color: [] for color in COLORS}
+    scanned = 0
     for rel, annotation, split in records:
         if split != "train":
             continue
-        if all(len(donors[k]) >= max_per_color for k in COLORS):
+        scanned += 1
+        if scanned > 1500 or all(len(donors[k]) >= max_per_color for k in COLORS):
             break
         image = cv2.imread(str(INPUT_ROOT / rel), cv2.IMREAD_COLOR)
         if image is None:
