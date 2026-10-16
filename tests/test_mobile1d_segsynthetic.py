@@ -176,3 +176,23 @@ def test_six_band_variant_survives_segmentation_and_alignment(fake_photo):
         0 <= b["bbox"][1] < b["bbox"][3] <= syn.TARGET_HW[0]
         for b in labels
     )
+
+
+def test_band_count_sampler_keeps_synthetic_six_band_from_dominating():
+    from collections import defaultdict
+    from types import SimpleNamespace
+    from resistor_model.train import _balanced_band_count_sampler
+
+    sizes = [3]*10 + [4]*25 + [5]*20 + [6]*120
+    dataset = SimpleNamespace(samples=[
+        SimpleNamespace(resistor=SimpleNamespace(bands=[object()]*count))
+        for count in sizes
+    ])
+    requested = {3: 0.04, 4: 0.65, 5: 0.18, 6: 0.13}
+    sampler = _balanced_band_count_sampler(dataset, requested, seed=42)
+    by_count = defaultdict(float)
+    for idx, count in enumerate(sizes):
+        by_count[count] += float(sampler.weights[idx])
+    total = sum(by_count.values())
+    assert {k: v / total for k,v in by_count.items()} == pytest.approx(requested)
+    assert _balanced_band_count_sampler(dataset, None, seed=42) is None
