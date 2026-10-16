@@ -574,7 +574,8 @@ def main() -> None:
     epochs = 1 if args.smoke else int(cfg["train"]["epochs"])
     warmup = min(int(cfg["train"]["warmup_epochs"]), max(epochs - 1, 0))
 
-    phase = cfg["train"].get("lr_initial_cycle_epochs")
+    # --smoke deliberately trains one epoch, so it cannot use a 60+60 schedule.
+    phase = None if args.smoke else cfg["train"].get("lr_initial_cycle_epochs")
     peak_factor = float(cfg["train"].get("lr_extension_peak_factor", 0.2))
 
     def lr_lambda(epoch: int) -> float:
