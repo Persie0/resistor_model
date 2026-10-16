@@ -48,7 +48,7 @@ import time
 import urllib.request
 
 
-MOBILE1D_COLAB_VERSION = "2026-10-16-v2-progress-packed-cache"
+MOBILE1D_COLAB_VERSION = "2026-10-16-v3-colab-kernel-import-fix"
 REPO_REF = os.environ.get("MOBILE1D_GIT_REF", "main")
 EPOCHS = 60
 CHECKPOINT_EVERY_EPOCHS = 5
@@ -245,11 +245,55 @@ def clone_training_repo() -> None:
     ])
 
 
+def activate_local_package() -> Path:
+    """Expose editable src-layout imports in the *running* Colab kernel.
+
+    pip -e creates a .pth import hook which a long-lived notebook interpreter
+    does not necessarily reload. Child Python processes may see the package
+    while this parent kernel still raises ModuleNotFoundError.
+    """
+    src = (MODEL_REPO / "src").resolve()
+    if not (src / "resistor_model" / "__init__.py").is_file():
+        raise RuntimeError(f"Cloned resistor_model package is missing: {src}")
+    src_str = str(src)
+    if src_str not in sys.path:
+        sys.path.insert(0, src_str)
+    existing = os.environ.get("PYTHONPATH", "")
+    paths = existing.split(os.pathsep) if existing else []
+    if src_str not in paths:
+        os.environ["PYTHONPATH"] = os.pathsep.join([src_str, *paths])
+    import importlib
+    importlib.invalidate_caches()
+    print(f"[python-path] notebook kernel imports from {src}", flush=True)
+    return src
+
+
 def install_dependencies() -> None:
     # Colab already provides CUDA-enabled PyTorch; mobile1d needs no extra deps.
     run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
     run([sys.executable, "-m", "pip", "install", "-q", "-e", f"{MODEL_REPO}[export]"])
     run([sys.executable, "-m", "pip", "install", "-q", "pytest"])
+    expected = activate_local_package()
+
+    # Verify BOTH import contexts before any dataset download or GPU training.
+    from resistor_model.tools import dataset_cache, packed_dataset_cache
+    import resistor_model
+    actual = Path(resistor_model.__file__).resolve()
+    if expected not in actual.parents:
+        raise RuntimeError(
+            f"Loaded a different resistor_model from {actual}; expected {expected}"
+        )
+    print(
+        f"[python-path] dataset cache modules ready in kernel | "
+        f"package {actual} | Python {sys.executable}",
+        flush=True,
+    )
+    run([
+        sys.executable, "-c",
+        "from resistor_model.tools import dataset_cache, packed_dataset_cache; "
+        "import resistor_model; "
+        "print('[python-path] subprocess import OK:', resistor_model.__file__)",
+    ])
 
 
 def dataset_roots() -> list[Path]:
