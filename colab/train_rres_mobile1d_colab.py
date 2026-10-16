@@ -245,46 +245,105 @@ def dataset_roots() -> list[Path]:
     return [DATA_ROOT / asset.removesuffix(".zip") for asset in DATASET_ASSETS]
 
 
+def _prepared_valid() -> bool:
+    outputs = ("manifest.jsonl", "splits.json", "import-report.json")
+    return (
+        all(
+            (DATA_ROOT / name).is_file() and (DATA_ROOT / name).stat().st_size > 0
+            for name in outputs
+        )
+        and all(root.is_dir() for root in dataset_roots())
+    )
+
+
+def _unpack_zip_with_progress(archive: Path, root: Path, label: str) -> None:
+    """Extract on local Colab SSD, logging file-count progress every ~15 seconds."""
+    root.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as source:
+        files = [info for info in source.infolist() if not info.is_dir()]
+        last = time.monotonic()
+        for index, member in enumerate(files, 1):
+            source.extract(member, root)
+            now = time.monotonic()
+            if index == len(files) or index % 1000 == 0 or now - last >= 15:
+                print(
+                    f"[extract:{label}] {index:,}/{len(files):,} files "
+                    f"({100 * index / max(len(files), 1):.0f}%)",
+                    flush=True,
+                )
+                last = now
+
+
 def download_release_datasets() -> None:
-    """Download and extract all three public r1 COCO datasets to local Colab storage."""
+    """Prefer verified source ZIPs from Drive, then release downloads."""
+    from resistor_model.tools import dataset_cache
+
     if DATA_ROOT.exists():
         shutil.rmtree(DATA_ROOT)
-    DATA_ROOT.mkdir(parents=True)
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
     DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-    for asset, root in zip(DATASET_ASSETS, dataset_roots(), strict=True):
-        archive = DOWNLOAD_ROOT / asset
-        url = f"{RELEASE_BASE}/{asset}"
-        print(f"Downloading {asset} ...", flush=True)
-        request = urllib.request.Request(url, headers={"User-Agent": "resistor-model-colab"})
-        with urllib.request.urlopen(request) as response, archive.open("wb") as destination:
-            shutil.copyfileobj(response, destination)
-        print(f"Downloaded {asset}: {archive.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
-        root.mkdir(parents=True, exist_ok=True)
-        shutil.unpack_archive(archive, root)
+    for index, (asset, root) in enumerate(zip(DATASET_ASSETS, dataset_roots(), strict=True), 1):
+        print(f"[dataset] archive {index}/{len(DATASET_ASSETS)}: {asset}", flush=True)
+        archive = dataset_cache.fetch_cached_archive(
+            local=DOWNLOAD_ROOT / asset,
+            drive_copy=DRIVE_ARCHIVE_ROOT / asset,
+            url=f"{RELEASE_BASE}/{asset}",
+            sha256=DATASET_SHAS[asset],
+            label=asset,
+        )
+        _unpack_zip_with_progress(archive, root, asset)
+    print("[dataset] all three archives extracted", flush=True)
 
 
-def prepare_dataset() -> None:
+def _create_manifest_and_splits() -> None:
     manifest = DATA_ROOT / "manifest.jsonl"
     splits = DATA_ROOT / "splits.json"
     report = DATA_ROOT / "import-report.json"
+    print("[dataset] importing annotations with grouping...", flush=True)
     command = [sys.executable, "-m", "resistor_model.tools.import_roboflow_coco"]
     for root in dataset_roots():
         command.extend(["--root", str(root)])
     command.extend([
-        "--output", str(manifest),
-        "--report", str(report),
-        "--min-bands", "3",
-        "--max-bands", "6",
+        "--output", str(manifest), "--report", str(report),
+        "--min-bands", "3", "--max-bands", "6",
     ])
-    run(command)
+    run(command, heartbeat_seconds=HEARTBEAT_SECONDS)
+    print("[dataset] calculating leakage-safe splits...", flush=True)
     run([
         sys.executable, "-m", "resistor_model.tools.make_splits",
-        "--manifest", str(manifest),
-        "--output", str(splits),
+        "--manifest", str(manifest), "--output", str(splits),
         "--ratios", "0.70", "0.15", "0.15",
-        "--seed", str(SEED),
-        "--group-session",
-    ])
+        "--seed", str(SEED), "--group-session",
+    ], heartbeat_seconds=HEARTBEAT_SECONDS)
+
+
+def prepare_dataset() -> None:
+    """Restore one checksummed Drive ZIP; rebuild and persist on cache misses."""
+    from resistor_model.tools import packed_dataset_cache
+
+    print(f"[dataset-cache] checking Drive ZIP at {DRIVE_PREPARED_ARCHIVE}", flush=True)
+    if packed_dataset_cache.prepared_usable_archive(
+        DRIVE_PREPARED_ARCHIVE, DRIVE_PREPARED_MANIFEST, DATASET_FINGERPRINT,
+    ):
+        if packed_dataset_cache.restore_prepared_archive(
+            DRIVE_PREPARED_ARCHIVE, DRIVE_PREPARED_MANIFEST,
+            DATA_ROOT, DATASET_FINGERPRINT,
+        ) and _prepared_valid():
+            print("[dataset-cache] ready: restored verified dataset from Google Drive", flush=True)
+            return
+        print("[dataset-cache] cached dataset invalid; preparing again", flush=True)
+    else:
+        print("[dataset-cache] cache missing or recipe changed", flush=True)
+
+    download_release_datasets()
+    _create_manifest_and_splits()
+    if not _prepared_valid():
+        raise RuntimeError("Prepared dataset has missing files; not saving a broken cache")
+    packed_dataset_cache.persist_prepared_archive(
+        DATA_ROOT, DRIVE_PREPARED_ARCHIVE,
+        DRIVE_PREPARED_MANIFEST, DATASET_FINGERPRINT,
+    )
+    print("[dataset-cache] prepared ZIP saved to Drive for future sessions", flush=True)
 
 
 def build_config(run_dir: Path, resume: Path | None, teacher: Path | None) -> dict:
