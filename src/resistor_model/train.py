@@ -242,6 +242,7 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         hflip_prob=float(data_cfg.get("hflip_prob", 0.5)),
         vflip_prob=float(data_cfg.get("vflip_prob", 0.5)),
         jitter_strength=float(data_cfg.get("jitter_strength", 1.0)),
+        pre_rectified=bool(data_cfg.get("pre_rectified", False)),
     )
     val_ds = ResistorBandDataset(
         **common,
@@ -250,6 +251,7 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         two_views=False,
         seed=int(cfg["seed"]) + 1,
         geometric_augment=False,
+        pre_rectified=bool(data_cfg.get("pre_rectified", False)),
     )
     if not train_ds:
         raise ValueError("training split is empty")
