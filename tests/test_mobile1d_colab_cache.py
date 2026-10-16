@@ -92,3 +92,31 @@ def test_resume_prefers_last_then_latest_numbered_snapshot(tmp_path: Path):
     assert colab.find_resume_checkpoint(tmp_path) == recovery / "epoch_010.pt"
     (tmp_path / "last.pt").write_bytes(b"latest")
     assert colab.find_resume_checkpoint(tmp_path) == tmp_path / "last.pt"
+
+def test_colab_editable_package_visible_without_kernel_restart(monkeypatch, tmp_path: Path):
+    """pip editable .pth files need not be refreshed in a running Colab kernel."""
+    import os
+    import subprocess
+    import sys
+
+    source = tmp_path / "training-repo" / "src"
+    stub_package = source / "resistor_model"
+    stub_package.mkdir(parents=True)
+    (stub_package / "__init__.py").write_text("VERSION = 'fresh-clone'\n")
+    monkeypatch.setattr(colab, "MODEL_REPO", tmp_path / "training-repo")
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != str(source)])
+    monkeypatch.setenv("PYTHONPATH", "")
+
+    activated = colab.activate_local_package()
+    assert activated == source.resolve()
+    assert str(source.resolve()) == sys.path[0]
+    assert str(source.resolve()) in os.environ["PYTHONPATH"].split(os.pathsep)
+    # Simulate a new training subprocess: it must see the same package source.
+    test = subprocess.run(
+        [sys.executable, "-c", "import resistor_model; print(resistor_model.__file__)"],
+        env=os.environ.copy(), capture_output=True, text=True, check=True,
+    )
+    assert str(source.resolve()) in test.stdout
+    # Repeated activation must not accumulate duplicate PYTHONPATH entries.
+    colab.activate_local_package()
+    assert os.environ["PYTHONPATH"].split(os.pathsep).count(str(source.resolve())) == 1
