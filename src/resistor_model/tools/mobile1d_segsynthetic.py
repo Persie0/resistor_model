@@ -67,7 +67,9 @@ class Segmenter:
             )
         self.path = model_path
         self.sha = sha256(model_path)
-        self.session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
+        self.session = ort.InferenceSession(str(model_path), providers=providers)
+        print(f"[segmenter] ONNX Runtime providers: {self.session.get_providers()}", flush=True)
         inp = self.session.get_inputs()[0]
         self.input = inp.name
         shape = inp.shape
