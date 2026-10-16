@@ -39,6 +39,11 @@ def configure_segmented_training(base, xl):
         config["data"]["geometric_augment"] = True
         config["data"]["jitter_strength"] = 0.0
         config["train"]["data_recipe"] = "r1-segsynthetic-lraspp-donor-bands-v2"
+        # Synthetic six-band samples are abundant; keep realistic count priors
+        # while still visiting them frequently enough to learn their grammar.
+        config["train"]["band_count_sampling_weights"] = {
+            3: 0.04, 4: 0.65, 5: 0.18, 6: 0.13,
+        }
         return config
 
     base.build_config = segmented_config
