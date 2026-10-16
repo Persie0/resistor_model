@@ -543,6 +543,8 @@ def main() -> None:
             float(checkpoint.get("best_macro_f1", -1.0)),
         )
 
+    if resume:
+        _print_status(f"[resume] checkpoint restored | completed {start_epoch}/{epochs} epochs")
     print(
         f"Training on {device} | epochs {start_epoch + 1}-{epochs} | "
         f"train batches {len(train_loader)} | val batches {len(val_loader)}",
@@ -604,6 +606,18 @@ def main() -> None:
         _atomic_torch_save(checkpoint, out_dir / "last.pt")
         if is_best:
             _atomic_torch_save(checkpoint, out_dir / "best.pt")
+        # Enabled by Mobile1D Colab only: retain a numbered recovery point
+        # without changing other training recipes.
+        checkpoint_every = int(cfg["train"].get("checkpoint_every", 0) or 0)
+        if checkpoint_every > 0 and ((epoch + 1) % checkpoint_every == 0 or epoch + 1 == epochs):
+            path = out_dir / "checkpoints" / f"epoch_{epoch + 1:03d}.pt"
+            _atomic_torch_save(checkpoint, path)
+            _print_status(f"[checkpoint] saved recovery snapshot {path}")
+        _print_status(
+            f"[checkpoint] epoch {epoch + 1}/{epochs} | last.pt saved"
+            + (" | new best.pt" if is_best else "")
+            + f" | best exact {best_key[0]:.4f} macro-F1 {best_key[1]:.4f}"
+        )
 
         record = {
             "epoch": epoch,
