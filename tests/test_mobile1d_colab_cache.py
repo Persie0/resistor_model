@@ -82,3 +82,13 @@ def test_mobile1d_checkpoint_frequency_is_opt_in(tmp_path: Path):
     cfg = colab.build_config(tmp_path / "run", None, None)
     assert cfg["train"]["checkpoint_every"] == 5
     assert cfg["train"]["resume"] is None
+
+
+def test_resume_prefers_last_then_latest_numbered_snapshot(tmp_path: Path):
+    recovery = tmp_path / "checkpoints"
+    recovery.mkdir()
+    (recovery / "epoch_005.pt").write_bytes(b"old")
+    (recovery / "epoch_010.pt").write_bytes(b"new")
+    assert colab.find_resume_checkpoint(tmp_path) == recovery / "epoch_010.pt"
+    (tmp_path / "last.pt").write_bytes(b"latest")
+    assert colab.find_resume_checkpoint(tmp_path) == tmp_path / "last.pt"
