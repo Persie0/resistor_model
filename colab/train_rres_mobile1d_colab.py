@@ -48,9 +48,13 @@ import time
 import urllib.request
 
 
-MOBILE1D_COLAB_VERSION = "2026-10-16-v3-colab-kernel-import-fix"
+MOBILE1D_COLAB_VERSION = "2026-10-16-v4-120-epoch-continuation"
 REPO_REF = os.environ.get("MOBILE1D_GIT_REF", "main")
-EPOCHS = 60
+EPOCHS = 120
+# Continue the original 60-epoch cosine schedule without changing its first phase.
+# Epochs 61-120 use a low-LR cosine restart (20% of the initial peak LR).
+LR_INITIAL_CYCLE_EPOCHS = 60
+LR_EXTENSION_PEAK_FACTOR = 0.20
 CHECKPOINT_EVERY_EPOCHS = 5
 HEARTBEAT_SECONDS = 30
 BATCH_SIZE = 32
@@ -456,6 +460,8 @@ def build_config(run_dir: Path, resume: Path | None, teacher: Path | None) -> di
             "output_dir": str(run_dir),
             "resume": str(resume) if resume is not None else None,
             "checkpoint_every": CHECKPOINT_EVERY_EPOCHS,
+            "lr_initial_cycle_epochs": LR_INITIAL_CYCLE_EPOCHS,
+            "lr_extension_peak_factor": LR_EXTENSION_PEAK_FACTOR,
         },
         "loss": {
             "dense": 1.0,
