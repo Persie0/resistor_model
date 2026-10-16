@@ -33,6 +33,10 @@ never by silently preferring left-to-right.
 from __future__ import annotations
 
 import json
+import os
+import queue
+import threading
+import zipfile
 from pathlib import Path
 import shutil
 import subprocess
@@ -41,7 +45,10 @@ import time
 import urllib.request
 
 
+MOBILE1D_COLAB_VERSION = "2026-10-16-v2-progress-packed-cache"
 EPOCHS = 60
+CHECKPOINT_EVERY_EPOCHS = 5
+HEARTBEAT_SECONDS = 30
 BATCH_SIZE = 32
 # Segmented body crops are ~193x63 (WxH). Requirement: input at least 2.5x per
 # side -> W >= 483, H >= 158, with W*H in (85k, 100k). Use 176x512 (HxW):
@@ -84,6 +91,23 @@ RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "r1-mobile1d-colab"
 TEACHER_RUN_DIR = DRIVE_MOUNT / "MyDrive" / "resistor_model" / "r1-v2-colab"
 CONFIG_PATH = WORK / "r1-mobile1d-colab.yaml"
 ZIP_PATH = WORK / "resistor-bandnet-mobile1d-colab.zip"
+DRIVE_PREPARED_ARCHIVE = RUN_DIR / "prepared_dataset.zip"
+DRIVE_PREPARED_MANIFEST = RUN_DIR / "prepared_dataset.manifest.json"
+DRIVE_ARCHIVE_ROOT = RUN_DIR / "archives"
+DATASET_SHAS = {
+    "rres.v4i.coco.zip": "24b46548700156a5f553197193c153b42381472b3eddfa2f9cf19d849fc84d4a",
+    "resistor.value.training.v8i.coco.zip": "dbf4b665d361a98d01024481970fc74be27d71e795b95dac5936af94dd4cf958",
+    "Deteksi.Nilai.Resistor.v1i.coco.zip": "ee8db6b64e59dfe47050b313f215051d3da5932dbe5e1f7b7d94e6495449dc92",
+}
+DATASET_FINGERPRINT = {
+    "recipe": "r1-mobile1d-three-coco-prepared-v1",
+    "dataset_sha256": DATASET_SHAS,
+    "import_min_bands": 3,
+    "import_max_bands": 6,
+    "split_ratios": [0.70, 0.15, 0.15],
+    "group_session": True,
+    "seed": SEED,
+}
 
 
 def run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
