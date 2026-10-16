@@ -166,15 +166,26 @@ def _long_axis(boxes):
 
 
 def new_colors(rng: np.random.Generator, n: int) -> list[str]:
-    if n == 3:
-        result = [str(rng.choice(DIGITS[1:])), str(rng.choice(DIGITS)), str(rng.choice(tuple(COLORS)))]
-    else:
-        result = [str(rng.choice(DIGITS[1:])), str(rng.choice(DIGITS))]
-        if n >= 5:
-            result += [str(rng.choice(DIGITS))]
-        result += [str(rng.choice(tuple(COLORS))), str(rng.choice(TOLERANCES))]
-        if n == 6:
-            result += [str(rng.choice(TEMPCOS))]
+    """Draw plausible manufactured E-series values, rather than random digits."""
+    from resistor_model.decoding import _E24, _E96
+
+    if n not in (3, 4, 5, 6):
+        raise ValueError(f"unsupported resistor band count {n}")
+    series = _E24 if n in (3, 4) else _E96
+    mantissa = int(rng.choice(series))
+    significant = f"{mantissa:02d}" if n <= 4 else f"{mantissa:03d}"
+    color_digits = [DIGITS[int(v)] for v in significant]
+    multiplier = str(rng.choice([
+        "gold", "black", "brown", "red", "orange", "yellow", "green"
+    ], p=[0.08, 0.12, 0.18, 0.27, 0.20, 0.10, 0.05]))
+    result = color_digits + [multiplier]
+    if n > 3:
+        result.append(str(rng.choice(
+            ["brown", "red", "green", "blue", "violet", "gold", "silver"],
+            p=[0.13, 0.10, 0.03, 0.02, 0.02, 0.60, 0.10]
+        )))
+    if n == 6:
+        result.append(str(rng.choice(TEMPCOS)))
     if not _decode_one(result).valid:
         raise AssertionError(f"synthetic band grammar invalid: {result}")
     return result
