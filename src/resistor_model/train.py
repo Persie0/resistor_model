@@ -10,7 +10,7 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from resistor_model.config import load_config
 from resistor_model.constants import COLOR_TO_INDEX
@@ -219,6 +219,41 @@ def _loss_weights(cfg: dict) -> LossWeights:
     )
 
 
+def _balanced_band_count_sampler(dataset, desired: dict, *, seed: int):
+    """Opt-in oversampling: keep rare 3/6-band crops useful without domination.
+
+    Target percentages are assigned to observed band-count groups. Per-sample
+    inverse-frequency weights ensure making thousands of extra six-band
+    synthetics does not force the count-head prior to six bands.
+    """
+    from collections import Counter
+
+    if not desired:
+        return None
+    observed = Counter(len(sample.resistor.bands) for sample in dataset.samples)
+    targets = {int(k): float(v) for k, v in desired.items()}
+    if any(not (v >= 0 and math.isfinite(v)) for v in targets.values()):
+        raise ValueError("band_count_sampling_weights require nonnegative finite proportions")
+    if not any(v > 0 and observed.get(n, 0) for n, v in targets.items()):
+        raise ValueError("band-count sampler has no positive-weight examples")
+    weights = [
+        targets.get(len(sample.resistor.bands), 0.0)
+        / max(observed[len(sample.resistor.bands)], 1)
+        for sample in dataset.samples
+    ]
+    _print_status(
+        "[sampling] target band-count mix " +
+        ", ".join(f"{n}: {targets.get(n,0):.0%} ({observed.get(n,0)} available)"
+                  for n in sorted(observed))
+    )
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.double),
+        num_samples=len(dataset),
+        replacement=True,
+        generator=torch.Generator().manual_seed(seed+201),
+    )
+
+
 def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader, DataLoader]:
     data_cfg = cfg["data"]
     common = dict(
@@ -264,9 +299,14 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         pin_memory=torch.cuda.is_available(),
     )
     generator = torch.Generator().manual_seed(int(cfg["seed"]))
+    sampler = _balanced_band_count_sampler(
+        train_ds, cfg["train"].get("band_count_sampling_weights"),
+        seed=int(cfg["seed"]),
+    )
     train_loader = DataLoader(
         train_ds,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         drop_last=False,
         generator=generator,
         worker_init_fn=_seed_dataset_worker,
