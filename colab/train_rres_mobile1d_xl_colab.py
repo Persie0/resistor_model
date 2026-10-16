@@ -15,11 +15,11 @@ from pathlib import Path
 SMALL_CHANNELS = 24
 SMALL_FEATURES = 128
 XL_CHANNELS = 48
-XL_FEATURES = 640
+XL_FEATURES = 568
 XL_BATCH_SIZE = 8  # conservative starting point for 15 GiB Tesla T4
 XL_EPOCHS = 120
 XL_LR = 2.5e-4
-MIN_PARAMETER_RATIO = 20.0
+MIN_PARAMETER_RATIO = 16.0
 XL_RUN_NAME = "r1-mobile1d-xl-colab"
 
 
@@ -34,7 +34,7 @@ def configure_xl(base) -> None:
     base.DRIVE_PREPARED_MANIFEST = cache_dir / "prepared_dataset.manifest.json"
     base.DRIVE_ARCHIVE_ROOT = cache_dir / "archives"
 
-    base.MOBILE1D_COLAB_VERSION = "2026-10-16-v1-mobile1d-xl-21x"
+    base.MOBILE1D_COLAB_VERSION = "2026-10-16-v2-mobile1d-xl-25mb"
     base.BASE_CHANNELS = XL_CHANNELS
     base.D_MODEL = XL_FEATURES
     base.BATCH_SIZE = XL_BATCH_SIZE
