@@ -686,7 +686,7 @@ def summarize() -> None:
     print(json.dumps(summary, indent=2), flush=True)
 
 
-def package_and_download() -> None:
+def package_and_download(*, download: bool = True) -> None:
     """Pack model/results only; prepared training data stays in Drive cache."""
     ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
     ZIP_PATH.unlink(missing_ok=True)
@@ -708,6 +708,8 @@ def package_and_download() -> None:
             if index == len(files) or index % 10 == 0:
                 print(f"[package] {index}/{len(files)} files", flush=True)
     print(f"[package] ready {ZIP_PATH.stat().st_size / 1024 / 1024:.1f} MiB", flush=True)
+    if not download:
+        return
     try:
         from google.colab import files
         files.download(str(ZIP_PATH))
