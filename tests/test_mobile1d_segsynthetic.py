@@ -140,3 +140,39 @@ def test_segsynthetic_xl_training_config_is_independent():
     assert config["model"]["d_model"]==568
     assert config["train"]["epochs"]==120
     assert config["train"]["resume"] is None
+
+
+def test_six_band_variant_survives_segmentation_and_alignment(fake_photo):
+    """Exercise generation -> geometric warp -> mask inference -> crop -> labels."""
+    image, mask, boxes = fake_photo
+
+    class SimulatedSegmenter:
+        def mask(self, bgr):
+            luminance = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            binary = (luminance > 42).astype(np.uint8)
+            binary = cv2.morphologyEx(
+                binary, cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (19, 19)),
+            )
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                binary, connectivity=8,
+            )
+            if count < 2:
+                raise ValueError("simulated segmenter failed")
+            biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            return (labels == biggest).astype(np.uint8)
+
+    crop, labels, quality = syn.process_variant(
+        SimulatedSegmenter(), image, boxes,
+        ["brown", "black", "red", "gold"],
+        np.random.default_rng(42), synthetic=True, count=6,
+    )
+    assert crop.shape[:2] == syn.TARGET_HW
+    assert len(labels) == 6
+    assert 0.42 <= quality <= 1.0
+    assert _decode_one([b["color"] for b in labels]).valid
+    assert all(
+        0 <= b["bbox"][0] < b["bbox"][2] <= syn.TARGET_HW[1] and
+        0 <= b["bbox"][1] < b["bbox"][3] <= syn.TARGET_HW[0]
+        for b in labels
+    )
