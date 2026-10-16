@@ -215,9 +215,16 @@ def mount_drive() -> None:
 
 
 def find_resume_checkpoint(run_dir: Path) -> Path | None:
-    checkpoint = Path(run_dir) / "last.pt"
+    root = Path(run_dir)
+    checkpoint = root / "last.pt"
     if checkpoint.is_file() and checkpoint.stat().st_size > 0:
         return checkpoint
+    # If the most recent last.pt was interrupted or missing, try the newest
+    # numbered recovery point; do not discard a completed training run.
+    for candidate in sorted((root / "checkpoints").glob("epoch_*.pt"), reverse=True):
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            print(f"[resume] last.pt unavailable; using recovery snapshot {candidate.name}", flush=True)
+            return candidate
     return None
 
 
