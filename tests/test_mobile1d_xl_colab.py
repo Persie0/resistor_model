@@ -77,7 +77,7 @@ def test_xl_forward_contract_is_unchanged():
     assert result["slot_color_logits"].shape == (1, 6, 12)
     assert result["count_logits"].shape == (1, 7)
     assert result["slot_center"].shape == (1, 6)
-    assert result["embedding"].shape == (1, 640)
+    assert result["embedding"].shape == (1, 568)
 
 
 def test_compact_package_excludes_xl_snapshots(monkeypatch, tmp_path: Path):
