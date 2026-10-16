@@ -73,7 +73,7 @@ def test_result_zip_does_not_embed_drive_training_cache(monkeypatch, tmp_path: P
     zip_path = tmp_path / "model-results.zip"
     monkeypatch.setattr(colab, "RUN_DIR", root)
     monkeypatch.setattr(colab, "ZIP_PATH", zip_path)
-    colab.package_and_download()
+    colab.package_and_download(download=False)
     with ZipFile(zip_path) as archive:
         assert set(archive.namelist()) == {"best.pt", "training_summary.json"}
 
