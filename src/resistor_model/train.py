@@ -10,7 +10,7 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from resistor_model.config import load_config
 from resistor_model.constants import COLOR_TO_INDEX
@@ -69,6 +69,70 @@ def _restore_scaler_state(scaler, checkpoint: dict) -> None:
 def _advance_scheduler_for_checkpoint(scheduler) -> dict:
     scheduler.step()
     return scheduler.state_dict()
+
+
+def _learning_rate_multiplier(
+    epoch: int,
+    *,
+    epochs: int,
+    warmup: int,
+    initial_cycle_epochs: int | None = None,
+    extension_peak_factor: float = 0.2,
+) -> float:
+    """LambdaLR factor for a full run or backward-compatible 60+60 extension.
+
+    Old checkpoints had a 60-epoch warmup/cosine cycle. Preserve that curve
+    exactly for epochs 1-60, then run a lower-peak second cosine cycle. Other
+    training configs continue to use their unchanged single-cycle schedule.
+    """
+    if initial_cycle_epochs is not None:
+        initial = int(initial_cycle_epochs)
+        if initial <= 0 or initial >= epochs:
+            raise ValueError("lr_initial_cycle_epochs must be between 1 and epochs-1")
+        if not 0 < extension_peak_factor <= 1:
+            raise ValueError("lr_extension_peak_factor must be in (0, 1]")
+        if epoch >= initial:
+            span = max(epochs - initial, 1)
+            progress = min(max((epoch - initial) / span, 0.0), 1.0)
+            return extension_peak_factor * 0.5 * (1.0 + math.cos(math.pi * progress))
+        cycle_epochs = initial
+    else:
+        cycle_epochs = epochs
+
+    if warmup > 0 and epoch < warmup:
+        return (epoch + 1) / warmup
+    span = max(cycle_epochs - warmup, 1)
+    progress = min(max((epoch - warmup) / span, 0.0), 1.0)
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def _align_resumed_extension_learning_rate(
+    *, optimizer, scheduler, checkpoint: dict, start_epoch: int, config: dict,
+) -> bool:
+    """Repair an old 60-epoch scheduler's zero LR on resuming at epoch 61.
+
+    This is only necessary if a previous run actually completed its shorter
+    planned schedule. Ordinary resumes leave optimizer/scheduler untouched.
+    """
+    train = config["train"]
+    phase = train.get("lr_initial_cycle_epochs")
+    if phase is None:
+        return False
+    previous_epochs = int(checkpoint.get("config", {}).get("train", {}).get("epochs", 0))
+    phase = int(phase)
+    if not (0 < previous_epochs <= phase <= start_epoch < int(train["epochs"])):
+        return False
+    multiplier = _learning_rate_multiplier(
+        start_epoch,
+        epochs=int(train["epochs"]),
+        warmup=int(train["warmup_epochs"]),
+        initial_cycle_epochs=phase,
+        extension_peak_factor=float(train.get("lr_extension_peak_factor", 0.2)),
+    )
+    for group, base in zip(optimizer.param_groups, scheduler.base_lrs, strict=True):
+        group["lr"] = float(base) * multiplier
+    scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
+    return True
 
 
 def _atomic_torch_save(obj, path: str | Path) -> None:
@@ -155,6 +219,41 @@ def _loss_weights(cfg: dict) -> LossWeights:
     )
 
 
+def _balanced_band_count_sampler(dataset, desired: dict, *, seed: int):
+    """Opt-in oversampling: keep rare 3/6-band crops useful without domination.
+
+    Target percentages are assigned to observed band-count groups. Per-sample
+    inverse-frequency weights ensure making thousands of extra six-band
+    synthetics does not force the count-head prior to six bands.
+    """
+    from collections import Counter
+
+    if not desired:
+        return None
+    observed = Counter(len(sample.resistor.bands) for sample in dataset.samples)
+    targets = {int(k): float(v) for k, v in desired.items()}
+    if any(not (v >= 0 and math.isfinite(v)) for v in targets.values()):
+        raise ValueError("band_count_sampling_weights require nonnegative finite proportions")
+    if not any(v > 0 and observed.get(n, 0) for n, v in targets.items()):
+        raise ValueError("band-count sampler has no positive-weight examples")
+    weights = [
+        targets.get(len(sample.resistor.bands), 0.0)
+        / max(observed[len(sample.resistor.bands)], 1)
+        for sample in dataset.samples
+    ]
+    _print_status(
+        "[sampling] target band-count mix " +
+        ", ".join(f"{n}: {targets.get(n,0):.0%} ({observed.get(n,0)} available)"
+                  for n in sorted(observed))
+    )
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.double),
+        num_samples=len(dataset),
+        replacement=True,
+        generator=torch.Generator().manual_seed(seed+201),
+    )
+
+
 def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader, DataLoader]:
     data_cfg = cfg["data"]
     common = dict(
@@ -178,6 +277,7 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         hflip_prob=float(data_cfg.get("hflip_prob", 0.5)),
         vflip_prob=float(data_cfg.get("vflip_prob", 0.5)),
         jitter_strength=float(data_cfg.get("jitter_strength", 1.0)),
+        pre_rectified=bool(data_cfg.get("pre_rectified", False)),
     )
     val_ds = ResistorBandDataset(
         **common,
@@ -186,6 +286,7 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         two_views=False,
         seed=int(cfg["seed"]) + 1,
         geometric_augment=False,
+        pre_rectified=bool(data_cfg.get("pre_rectified", False)),
     )
     if not train_ds:
         raise ValueError("training split is empty")
@@ -198,9 +299,14 @@ def _make_loaders(cfg: dict, split_ids: dict[str, set[str]]) -> tuple[DataLoader
         pin_memory=torch.cuda.is_available(),
     )
     generator = torch.Generator().manual_seed(int(cfg["seed"]))
+    sampler = _balanced_band_count_sampler(
+        train_ds, cfg["train"].get("band_count_sampling_weights"),
+        seed=int(cfg["seed"]),
+    )
     train_loader = DataLoader(
         train_ds,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         drop_last=False,
         generator=generator,
         worker_init_fn=_seed_dataset_worker,
@@ -510,14 +616,24 @@ def main() -> None:
     epochs = 1 if args.smoke else int(cfg["train"]["epochs"])
     warmup = min(int(cfg["train"]["warmup_epochs"]), max(epochs - 1, 0))
 
+    # --smoke deliberately trains one epoch, so it cannot use a 60+60 schedule.
+    phase = None if args.smoke else cfg["train"].get("lr_initial_cycle_epochs")
+    peak_factor = float(cfg["train"].get("lr_extension_peak_factor", 0.2))
+
     def lr_lambda(epoch: int) -> float:
-        if warmup > 0 and epoch < warmup:
-            return (epoch + 1) / warmup
-        span = max(epochs - warmup, 1)
-        progress = min(max((epoch - warmup) / span, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        return _learning_rate_multiplier(
+            epoch, epochs=epochs, warmup=warmup,
+            initial_cycle_epochs=int(phase) if phase is not None else None,
+            extension_peak_factor=peak_factor,
+        )
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    if phase is not None:
+        _print_status(
+            f"[lr] first cycle 1-{phase} retains original schedule; "
+            f"extension {int(phase) + 1}-{epochs} starts at "
+            f"{peak_factor * float(cfg['train']['lr']):.3e} LR"
+        )
     scaler = torch.amp.GradScaler(
         "cuda", enabled=bool(cfg["train"]["amp"]) and device.type == "cuda"
     )
@@ -542,7 +658,18 @@ def main() -> None:
             float(checkpoint.get("best_exact_sequence", -1.0)),
             float(checkpoint.get("best_macro_f1", -1.0)),
         )
+        if _align_resumed_extension_learning_rate(
+            optimizer=optimizer, scheduler=scheduler, checkpoint=checkpoint,
+            start_epoch=start_epoch, config=cfg,
+        ):
+            _print_status(
+                f"[resume] extended an old {checkpoint['config']['train']['epochs']}-epoch "
+                f"checkpoint; using low-LR phase 2 at "
+                f"{optimizer.param_groups[0]['lr']:.3e}"
+            )
 
+    if resume:
+        _print_status(f"[resume] checkpoint restored | completed {start_epoch}/{epochs} epochs")
     print(
         f"Training on {device} | epochs {start_epoch + 1}-{epochs} | "
         f"train batches {len(train_loader)} | val batches {len(val_loader)}",
@@ -604,6 +731,18 @@ def main() -> None:
         _atomic_torch_save(checkpoint, out_dir / "last.pt")
         if is_best:
             _atomic_torch_save(checkpoint, out_dir / "best.pt")
+        # Enabled by Mobile1D Colab only: retain a numbered recovery point
+        # without changing other training recipes.
+        checkpoint_every = int(cfg["train"].get("checkpoint_every", 0) or 0)
+        if checkpoint_every > 0 and ((epoch + 1) % checkpoint_every == 0 or epoch + 1 == epochs):
+            path = out_dir / "checkpoints" / f"epoch_{epoch + 1:03d}.pt"
+            _atomic_torch_save(checkpoint, path)
+            _print_status(f"[checkpoint] saved recovery snapshot {path}")
+        _print_status(
+            f"[checkpoint] epoch {epoch + 1}/{epochs} | last.pt saved"
+            + (" | new best.pt" if is_best else "")
+            + f" | best exact {best_key[0]:.4f} macro-F1 {best_key[1]:.4f}"
+        )
 
         record = {
             "epoch": epoch,

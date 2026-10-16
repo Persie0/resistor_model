@@ -40,6 +40,7 @@ class ResistorBandDataset(Dataset):
         hflip_prob: float = 0.5,
         vflip_prob: float = 0.5,
         jitter_strength: float = 1.0,
+        pre_rectified: bool = False,
     ) -> None:
         self.manifest_path = Path(manifest)
         self.image_root = Path(image_root) if image_root is not None else self.manifest_path.parent
@@ -51,6 +52,7 @@ class ResistorBandDataset(Dataset):
         self.hflip_prob = float(hflip_prob)
         self.vflip_prob = float(vflip_prob)
         self.jitter_strength = float(jitter_strength)
+        self.pre_rectified = bool(pre_rectified)
         self.augmenter = PhotometricAugment(seed=seed) if augment else PhotometricAugment(probability=0.0, seed=seed)
         self.augmenter2 = PhotometricAugment(seed=seed + 100003) if augment else PhotometricAugment(probability=0.0, seed=seed + 100003)
         self.geom_rng = np.random.default_rng(seed + 200003)
@@ -121,15 +123,33 @@ class ResistorBandDataset(Dataset):
         if bgr is None:
             raise FileNotFoundError(f"could not read image: {path}")
         bands = [{"color": band.color, "bbox": list(band.bbox)} for band in ref.resistor.bands]
-        jitter = sample_rectify_jitter(self.geom_rng, self.jitter_strength) if self.geometric_augment else None
-        crop_bgr, transformed = rectify_resistor(
-            bgr,
-            bands,
-            resistor_bbox=list(ref.resistor.bbox) if ref.resistor.bbox else None,
-            resistor_polygon=[list(point) for point in ref.resistor.polygon] if ref.resistor.polygon else None,
-            output_size=self.output_size,
-            jitter=jitter,
-        )
+        if self.pre_rectified:
+            # Segmentation-produced crops are ALREADY horizontal and labeled in
+            # their own image coordinates. Rectifying again would use inferred
+            # geometry and distort the synthetic band annotations.
+            src_h, src_w = bgr.shape[:2]
+            dst_h, dst_w = self.output_size
+            if src_w <= 0 or src_h <= 0:
+                raise ValueError("pre-rectified image has invalid dimensions")
+            crop_bgr = cv2.resize(bgr, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR)
+            sx, sy = dst_w / src_w, dst_h / src_h
+            transformed = [
+                {"color": b["color"], "bbox": [
+                    b["bbox"][0] * sx, b["bbox"][1] * sy,
+                    b["bbox"][2] * sx, b["bbox"][3] * sy,
+                ]}
+                for b in bands
+            ]
+        else:
+            jitter = sample_rectify_jitter(self.geom_rng, self.jitter_strength) if self.geometric_augment else None
+            crop_bgr, transformed = rectify_resistor(
+                bgr,
+                bands,
+                resistor_bbox=list(ref.resistor.bbox) if ref.resistor.bbox else None,
+                resistor_polygon=[list(point) for point in ref.resistor.polygon] if ref.resistor.polygon else None,
+                output_size=self.output_size,
+                jitter=jitter,
+            )
         rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         if self.geometric_augment:
             rgb, transformed = apply_flips(
