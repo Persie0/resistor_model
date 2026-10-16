@@ -466,13 +466,16 @@ def benchmark_student() -> dict:
     model.load_state_dict(ckpt["model_state"])
     params = sum(p.numel() for p in model.parameters())
     dummy = torch.zeros(1, 3, OUTPUT_HEIGHT, OUTPUT_WIDTH)
+    print("[benchmark] CPU warmup 10 iterations...", flush=True)
     with torch.no_grad():
         for _ in range(10):
             model(dummy)
         t0 = time.perf_counter()
         iters = 50
-        for _ in range(iters):
+        for index in range(iters):
             model(dummy)
+            if (index + 1) % 10 == 0:
+                print(f"[benchmark] CPU {index + 1}/{iters} ({(index + 1) / iters * 100:.0f}%)", flush=True)
         cpu_ms = (time.perf_counter() - t0) / iters * 1000.0
     report: dict = {
         "params_m": round(params / 1e6, 3),
@@ -482,13 +485,16 @@ def benchmark_student() -> dict:
     if torch.cuda.is_available():
         model = model.cuda().eval()
         gpu_dummy = dummy.cuda()
+        print("[benchmark] GPU warmup 20 iterations...", flush=True)
         with torch.no_grad():
             for _ in range(20):
                 model(gpu_dummy)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            for _ in range(100):
+            for index in range(100):
                 model(gpu_dummy)
+                if (index + 1) % 20 == 0:
+                    print(f"[benchmark] GPU {index + 1}/100 ({index + 1}%)", flush=True)
             torch.cuda.synchronize()
             report["gpu_ms_per_image"] = round((time.perf_counter() - t0) / 100 * 1000.0, 2)
     (RUN_DIR / "mobile_benchmark.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -548,6 +554,7 @@ def evaluate_flip_tta(max_samples: int = 200) -> dict:
                 if base.decode.valid or flip.decode.valid:
                     valid_either += 1
                 checked += 1
+            print(f"[flip-tta] {checked}/{min(max_samples, len(ds))} crops inspected", flush=True)
             if checked >= max_samples:
                 break
     report = {
