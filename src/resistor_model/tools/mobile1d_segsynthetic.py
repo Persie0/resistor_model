@@ -95,7 +95,7 @@ class Segmenter:
         score = probability[0, 0, top:top+nh, left:left+nw]
         score = cv2.resize(score, (width, height))
         binary = (score >= 0.50).astype(np.uint8)
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if n < 2:
             raise ValueError("segmenter found no resistor")
         selected = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
