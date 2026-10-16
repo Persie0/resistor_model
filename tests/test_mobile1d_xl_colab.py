@@ -1,4 +1,4 @@
-"""High-capacity Mobile1D XL stays separate and exceeds 20x base parameter count."""
+"""High-capacity Mobile1D XL stays separate and targets a 25 MB FP32 model."""
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -42,7 +42,7 @@ def test_xl_uses_isolated_checkpoints_but_shared_verified_dataset_cache():
     assert config["train"]["resume"] is None
     assert config["model"]["architecture"] == "mobile1d"
     assert config["model"]["base_channels"] == 48
-    assert config["model"]["d_model"] == 640
+    assert config["model"]["d_model"] == 568
     assert config["data"]["output_size"] == [176, 512]
     assert config["train"]["epochs"] == 120
     assert config["train"]["batch_size"] == 8
@@ -50,7 +50,7 @@ def test_xl_uses_isolated_checkpoints_but_shared_verified_dataset_cache():
     assert config["train"]["lr_initial_cycle_epochs"] is None
 
 
-def test_xl_actual_parameters_are_at_least_20x_baseline():
+def test_xl_parameters_approximately_25mb():
     base = _load_script(BASE_SCRIPT, "mobile1d_base_capacity_test")
     xl = _load_script(XL_SCRIPT, "mobile1d_xl_capacity_test")
     old_config = base.build_config(base.RUN_DIR, None, None)
@@ -62,8 +62,8 @@ def test_xl_actual_parameters_are_at_least_20x_baseline():
     model = build_model(xl_config)
     xl_params = sum(p.numel() for p in model.parameters())
     assert old_params == 369_116
-    assert xl_params == 7_981_732
-    assert xl_params >= 20 * old_params
+    assert xl_params == 6_333_985
+    assert 24_500_000 < xl_params * 4 < 26_000_000
 
 
 def test_xl_forward_contract_is_unchanged():
