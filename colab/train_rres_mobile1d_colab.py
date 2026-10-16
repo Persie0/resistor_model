@@ -20,7 +20,10 @@ reader, instead of the heavier V2 transformer:
 
 The same three public COCO datasets as the r1 V2 run are downloaded to local
 Colab storage. Checkpoints persist in ``MyDrive/resistor_model/r1-mobile1d-colab``
-and ``last.pt`` is resumed automatically. If a trained V2 teacher exists at
+and ``last.pt`` is resumed automatically. A checksummed prepared dataset ZIP
+is restored from Drive on subsequent runs (with verified source archive backups).
+Training prints each stage, batch percentage/loss/ETA, and periodic silent-step
+heartbeats. Recovery snapshots are saved every five epochs. If a trained V2 teacher exists at
 ``MyDrive/resistor_model/r1-v2-colab/best.pt`` it is used for KL distillation
 (dense + slot colors); otherwise the student trains from scratch.
 
@@ -46,6 +49,7 @@ import urllib.request
 
 
 MOBILE1D_COLAB_VERSION = "2026-10-16-v2-progress-packed-cache"
+REPO_REF = os.environ.get("MOBILE1D_GIT_REF", "main")
 EPOCHS = 60
 CHECKPOINT_EVERY_EPOCHS = 5
 HEARTBEAT_SECONDS = 30
@@ -229,7 +233,7 @@ def clone_training_repo() -> None:
     if MODEL_REPO.exists():
         shutil.rmtree(MODEL_REPO)
     run([
-        "git", "clone", "--depth", "1", "--branch", "main",
+        "git", "clone", "--depth", "1", "--branch", REPO_REF,
         "https://github.com/Persie0/resistor_model.git", str(MODEL_REPO),
     ])
 
