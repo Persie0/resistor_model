@@ -92,7 +92,7 @@ def test_shards_verified_and_no_synthetic_data_in_heldout(monkeypatch,tmp_path:P
     remote=tmp_path/"remote"
     remote.mkdir()
     monkeypatch.setattr(syn,"DRIVE_ROOT",remote)
-    recipe={"version":"test-only"}
+    recipe={"version":"test-only","segmenter_sha256":"mock-segmenter"}
     counts={"observed":{"train":1,"val":1,"test":1},"crops":4,"failed":0}
     stage=tmp_path/"build"
     (stage/"images").mkdir(parents=True)
