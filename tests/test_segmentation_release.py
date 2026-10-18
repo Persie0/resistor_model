@@ -131,10 +131,10 @@ def test_repairs_old_onnx_only_cache_without_replacing_graph(monkeypatch, tmp_pa
 def test_does_not_overwrite_custom_incomplete_onnx(monkeypatch, tmp_path):
     filename="resistor_segmenter_lraspp.onnx"
     raw=_onnx_bytes(filename)
-    _fake_asset(monkeypatch,tmp_path,"lraspp",{
+    asset=_fake_asset(monkeypatch,tmp_path,"lraspp",{
         filename:raw, filename+".data":struct.pack("<f",2.0),
     })
-    dest=tmp_path/"drive"/"segmentation-v4-lraspp"/filename
+    dest=tmp_path/"drive"/asset["drive_folder"]/filename
     dest.parent.mkdir(parents=True)
     dest.write_bytes(raw)
     with pytest.raises(FileNotFoundError, match="custom ONNX"):
