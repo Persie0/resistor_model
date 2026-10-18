@@ -2,7 +2,7 @@
 
 This is a Colab convenience layer, not a model downloader for arbitrary URLs:
 each published artifact is pinned to the SHA-256 exposed by GitHub Releases.
-Only the ONNX export (and its optional JSON metadata) is copied to Drive;
+Only the ONNX export, its external tensor data, and optional JSON metadata are copied to Drive;
 large training checkpoints and dataset files are not extracted.
 """
 from __future__ import annotations
@@ -106,95 +106,239 @@ def _select_member(archive: zipfile.ZipFile, name: str) -> zipfile.ZipInfo | Non
     return matches[0] if matches else None
 
 
-def ensure_segmentation_onnx(
-    choice: str,
-    drive_base: Path = Path("/content/drive/MyDrive/resistor_model"),
-) -> Path:
-    """Return the existing ONNX or install an SHA-verified release export.
+def _external_data_locations(model_path: Path) -> list[str]:
+    """Read ONNX protobuf refs without loading the potentially large weights."""
+    import onnx
 
-    An already-present ONNX is always retained, including custom-trained ones.
-    The first restore may download 500-970 MB; later runs use the Drive copy.
-    For LR-ASPP only, a packaged best.pt is exported when the ZIP has no ONNX.
-    """
-    if choice not in RELEASE_ASSETS:
-        raise ValueError(f"Unknown segmenter {choice!r}; expected lraspp or ppliteseg")
-    asset = RELEASE_ASSETS[choice]
-    result = Path(drive_base) / asset["drive_folder"] / asset["filename"]
-    if result.is_file() and result.stat().st_size > 0:
-        print(f"[segmenter-release] reusing existing Drive ONNX: {result}", flush=True)
-        return result
+    model = onnx.load_model(str(model_path), load_external_data=False)
+    locations: set[str] = set()
+    for tensor in model.graph.initializer:
+        if tensor.data_location != onnx.TensorProto.EXTERNAL:
+            continue
+        attributes = {kv.key: kv.value for kv in tensor.external_data}
+        location = attributes.get("location")
+        if not location or not _safe_member(location):
+            raise ValueError(f"Unsafe or missing ONNX external tensor location: {location!r}")
+        locations.add(location)
+    return sorted(locations)
 
-    print(
-        f"[segmenter-release] missing {result.name} in Drive; fetching {asset['url']} "
-        f"({asset['bytes']/MIB:.0f} MiB, SHA-256 verified)", flush=True
-    )
-    result.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="resistor-segmenter-", dir="/content"
-                                     if Path("/content").is_dir() else None) as temp:
-        tmp = Path(temp)
-        downloaded = tmp / "release.zip"
-        _download_and_verify(asset["url"], downloaded, asset["sha256"], asset["bytes"])
 
-        with zipfile.ZipFile(downloaded) as archive:
-            names = archive.namelist()
-            # Refuse ZIP traversal, even though we only extract selected members.
-            if any(not _safe_member(name) for name in names):
-                raise ValueError("GitHub Release ZIP includes an unsafe path")
+def _external_path(model_path: Path, location: str) -> Path:
+    if not _safe_member(location):
+        raise ValueError(f"Unsafe ONNX external tensor location: {location!r}")
+    return model_path.parent.joinpath(*PurePosixPath(location).parts)
 
-            exported = _select_member(archive, asset["filename"])
-            if exported is not None:
-                _extract_member(archive, exported, result)
-                print(
-                    f"[segmenter-release] extracted {exported.filename} "
-                    f"({result.stat().st_size/MIB:.1f} MiB) -> {result}", flush=True,
-                )
-                metadata = _select_member(archive, asset["filename"] + ".json")
-                if metadata is not None:
-                    _extract_member(archive, metadata, result.with_suffix(result.suffix+".json"))
-            elif choice == "lraspp":
-                checkpoint = _select_member(archive, "best.pt")
-                if checkpoint is None:
-                    raise FileNotFoundError(
-                        "Verified LR-ASPP release contains neither resistor_segmenter_lraspp.onnx "
-                        "nor best.pt; cannot build a segmentation model."
-                    )
-                checkpoint_path = tmp / "best.pt"
-                _extract_member(archive, checkpoint, checkpoint_path)
-                print(
-                    "[segmenter-release] ONNX absent from release; exporting "
-                    "packaged LR-ASPP best.pt checkpoint...", flush=True
-                )
-                from resistor_model.export_segmentation import export_onnx
-                local_onnx = tmp / asset["filename"]
-                export_onnx(checkpoint_path, local_onnx)
-                if not local_onnx.is_file() or local_onnx.stat().st_size == 0:
-                    raise RuntimeError("LR-ASPP checkpoint conversion did not produce an ONNX")
-                partial = result.with_name(result.name + ".partial")
-                try:
-                    shutil.copyfile(local_onnx, partial)
-                    os.replace(partial, result)
-                finally:
-                    partial.unlink(missing_ok=True)
-                local_metadata = local_onnx.with_suffix(local_onnx.suffix + ".json")
-                if local_metadata.exists():
-                    shutil.copyfile(local_metadata, result.with_suffix(result.suffix+".json"))
-            else:
-                raise FileNotFoundError(
-                    "Verified PP-LiteSeg v5 release has no "
-                    f"{asset['filename']}. Re-export the trained model to ONNX first "
-                    "or select SEGMENTER_CHOICE='lraspp'."
-                )
-    if not result.is_file() or result.stat().st_size == 0:
-        raise RuntimeError("Segmentation ONNX was not installed")
+
+def _missing_external_data(model_path: Path) -> list[str]:
+    return [
+        location for location in _external_data_locations(model_path)
+        if not _external_path(model_path, location).is_file()
+        or _external_path(model_path, location).stat().st_size == 0
+    ]
+
+
+def _required_external_member(
+    archive: zipfile.ZipFile, exported: zipfile.ZipInfo, location: str,
+) -> zipfile.ZipInfo:
+    """Match external data relative to the ONNX's path inside the ZIP."""
+    expected = (PurePosixPath(exported.filename).parent / location).as_posix()
+    matches = [i for i in archive.infolist() if i.filename == expected and not i.is_dir()]
+    if len(matches) != 1 or not _safe_member(expected):
+        raise FileNotFoundError(
+            f"Release contains {exported.filename!r} referencing {location!r}, "
+            f"but the required external weights {expected!r} are missing."
+        )
+    return matches[0]
+
+
+def _validate_complete_export(model_path: Path) -> list[str]:
+    """Require every external data sidecar to exist and be ONNX-readable."""
+    missing = _missing_external_data(model_path)
+    if missing:
+        raise FileNotFoundError(
+            f"ONNX external weights missing next to {model_path}: {', '.join(missing)}"
+        )
+    # Loading with external_data=True also catches truncated or broken tensors.
+    import onnx
+    onnx.load_model(str(model_path), load_external_data=True)
+    return _external_data_locations(model_path)
+
+
+def _write_receipt(choice: str, asset: dict, result: Path, locations: list[str]) -> None:
     receipt = {
         "choice": choice,
         "release_url": asset["url"],
         "release_sha256": asset["sha256"],
         "model_sha256": _sha256(result),
         "model_bytes": result.stat().st_size,
+        "external_data_files": [
+            {
+                "location": loc,
+                "bytes": _external_path(result, loc).stat().st_size,
+                "sha256": _sha256(_external_path(result, loc)),
+            } for loc in locations
+        ],
     }
     (result.parent / (result.name + ".release.json")).write_text(
         json.dumps(receipt, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"[segmenter-release] saved and cached on Drive: {result}", flush=True)
+
+
+def ensure_segmentation_onnx(
+    choice: str,
+    drive_base: Path = Path("/content/drive/MyDrive/resistor_model"),
+) -> Path:
+    """Return complete ONNX + tensor sidecars; repair incomplete release caches.
+
+    Custom models are retained if complete. A previous incomplete release
+    extraction is safely repaired after checking its recorded model checksum.
+    """
+    if choice not in RELEASE_ASSETS:
+        raise ValueError(f"Unknown segmenter {choice!r}; expected lraspp or ppliteseg")
+    asset = RELEASE_ASSETS[choice]
+    result = Path(drive_base) / asset["drive_folder"] / asset["filename"]
+    receipt_path = result.parent / (result.name + ".release.json")
+    have_model = result.is_file() and result.stat().st_size > 0
+    missing: list[str] = []
+    if have_model:
+        missing = _missing_external_data(result)
+        if not missing:
+            print(f"[segmenter-release] reusing complete Drive ONNX: {result}", flush=True)
+            return result
+        if not receipt_path.is_file():
+            raise FileNotFoundError(
+                f"Existing custom ONNX at {result} requires external files {missing}, "
+                "but has no verified release receipt. Restore its own sidecars "
+                "or move it aside to install the published model."
+            )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if (receipt.get("model_sha256") != _sha256(result)
+                or receipt.get("release_sha256") != asset["sha256"]
+                or receipt.get("choice") != choice):
+            raise ValueError(
+                "Incomplete ONNX differs from recorded release. "
+                "Refusing to overwrite an unknown/custom model."
+            )
+        print(
+            "[segmenter-release] incomplete cached ONNX; restoring missing "
+            f"external weights: {missing}", flush=True
+        )
+    else:
+        print(f"[segmenter-release] missing ONNX in Drive: {result}", flush=True)
+
+    print(
+        f"[segmenter-release] fetching {asset['url']} "
+        f"({asset['bytes']/MIB:.0f} MiB, SHA-256 verified)",
+        flush=True,
+    )
+    result.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="resistor-segmenter-",
+        dir="/content" if Path("/content").is_dir() else None,
+    ) as temp:
+        tmp = Path(temp)
+        archive_path = tmp / "release.zip"
+        _download_and_verify(asset["url"], archive_path, asset["sha256"], asset["bytes"])
+        with zipfile.ZipFile(archive_path) as archive:
+            names = archive.namelist()
+            if any(not _safe_member(name) for name in names):
+                raise ValueError("GitHub Release ZIP includes an unsafe path")
+            exported = _select_member(archive, asset["filename"])
+
+            if exported is None:
+                if have_model:
+                    raise FileNotFoundError(
+                        f"Cannot repair {result}: release no longer includes the ONNX export"
+                    )
+                if choice != "lraspp":
+                    raise FileNotFoundError(
+                        "Verified PP-LiteSeg release does not contain "
+                        f"{asset['filename']}; re-export the trained model."
+                    )
+                checkpoint = _select_member(archive, "best.pt")
+                if checkpoint is None:
+                    raise FileNotFoundError(
+                        "Verified LR-ASPP release contains neither ONNX nor best.pt."
+                    )
+                from resistor_model.export_segmentation import export_onnx
+                checkpoint_path = tmp / "best.pt"
+                _extract_member(archive, checkpoint, checkpoint_path)
+                print("[segmenter-release] exporting packaged LR-ASPP best.pt...", flush=True)
+                staged = tmp / asset["filename"]
+                export_onnx(checkpoint_path, staged)
+            else:
+                staged = tmp / asset["filename"]
+                _extract_member(archive, exported, staged)
+
+            # Discover tensor locations from the actual ONNX graph, rather than
+            # assuming a fixed .data basename or omitting external weights.
+            all_locations = _external_data_locations(staged)
+            needed = missing if have_model else all_locations
+            for location in needed:
+                if exported is None:
+                    source = _external_path(staged, location)
+                    if not source.is_file() or source.stat().st_size == 0:
+                        raise FileNotFoundError(
+                            f"Checkpoint export omitted ONNX tensor data {location}"
+                        )
+                else:
+                    member = _required_external_member(archive, exported, location)
+                    source = _external_path(staged, location)
+                    _extract_member(archive, member, source)
+                print(
+                    f"[segmenter-release] restored external weights {location} "
+                    f"({_external_path(staged, location).stat().st_size/MIB:.1f} MiB)",
+                    flush=True,
+                )
+
+            if have_model:
+                if all_locations != _external_data_locations(result):
+                    raise ValueError("Release ONNX external data references differ from cached model")
+                # Do not overwrite the existing ONNX bytes. The sidecars alone
+                # were omitted by the previous downloader.
+                for location in needed:
+                    destination = _external_path(result, location)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    partial = destination.with_name(destination.name + ".partial")
+                    try:
+                        shutil.copyfile(_external_path(staged, location), partial)
+                        os.replace(partial, destination)
+                    finally:
+                        partial.unlink(missing_ok=True)
+            else:
+                # Weights first, ONNX model last: a disconnect cannot expose a
+                # new graph as complete before its external tensors are present.
+                for location in all_locations:
+                    destination = _external_path(result, location)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    partial = destination.with_name(destination.name + ".partial")
+                    try:
+                        shutil.copyfile(_external_path(staged, location), partial)
+                        os.replace(partial, destination)
+                    finally:
+                        partial.unlink(missing_ok=True)
+                partial = result.with_name(result.name + ".partial")
+                try:
+                    shutil.copyfile(staged, partial)
+                    os.replace(partial, result)
+                finally:
+                    partial.unlink(missing_ok=True)
+
+            if exported is not None:
+                metadata = _select_member(archive, asset["filename"] + ".json")
+                if metadata is not None:
+                    _extract_member(
+                        archive, metadata, result.with_suffix(result.suffix + ".json")
+                    )
+            else:
+                local_meta = staged.with_suffix(staged.suffix + ".json")
+                if local_meta.is_file():
+                    shutil.copyfile(local_meta, result.with_suffix(result.suffix + ".json"))
+
+    locations = _validate_complete_export(result)
+    _write_receipt(choice, asset, result, locations)
+    print(
+        f"[segmenter-release] complete model + {len(locations)} external file(s) "
+        f"saved to Drive: {result}", flush=True
+    )
     return result
