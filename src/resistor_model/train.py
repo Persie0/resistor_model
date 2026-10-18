@@ -248,7 +248,7 @@ def _balanced_band_count_sampler(dataset, desired: dict, *, seed: int):
     )
     return WeightedRandomSampler(
         weights=torch.as_tensor(weights, dtype=torch.double),
-        num_samples=len(dataset),
+        num_samples=len(dataset.samples),
         replacement=True,
         generator=torch.Generator().manual_seed(seed+201),
     )
