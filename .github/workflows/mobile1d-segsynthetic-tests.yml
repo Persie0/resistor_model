@@ -36,6 +36,7 @@ jobs:
             tests/test_mobile1d_xl_colab.py \
             tests/test_mobile1d_colab_cache.py \
             tests/test_mobile1d_segsynthetic.py \
+            tests/test_segmentation_release.py \
             tests/test_training_lr_extension.py \
             tests/test_runtime.py \
             tests/test_dataset.py
