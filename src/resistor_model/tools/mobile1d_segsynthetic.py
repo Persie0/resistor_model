@@ -44,7 +44,10 @@ RECIPE = "r1-segsynthetic-lraspp-donor-bands-v2"
 INPUT_ROOT = Path("/content/resistor_training/r1_datasets")
 WORK_ROOT = Path("/content/mobile1d_segsynthetic")
 DRIVE_ROOT = Path("/content/drive/MyDrive/resistor_model/mobile1d-segsynthetic-data")
-SEGMENTER = Path("/content/drive/MyDrive/resistor_model/segmentation-v4-lraspp/resistor_segmenter_lraspp.onnx")
+# Override to the exported PP-LiteSeg ONNX when that is the trained segmenter.
+# Example: MOBILE1D_SEGMENTER_ONNX=/content/drive/MyDrive/resistor_model/segmentation-pp-liteseg/resistor_segmenter_ppliteseg.onnx
+SEGMENTER = Path(os.environ.get("MOBILE1D_SEGMENTER_ONNX",
+    "/content/drive/MyDrive/resistor_model/segmentation-v4-lraspp/resistor_segmenter_lraspp.onnx"))
 MEAN = np.asarray([0.485, 0.456, 0.406], np.float32)
 STD = np.asarray([0.229, 0.224, 0.225], np.float32)
 
@@ -57,6 +60,27 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _foreground_from_output(raw: np.ndarray) -> np.ndarray:
+    """Convert LR-ASPP probabilities or PaddleSeg class logits to a binary mask."""
+    arr = np.asarray(raw)
+    if arr.ndim == 4:
+        if arr.shape[1] == 2:
+            return (arr[0].argmax(axis=0) == 1).astype(np.uint8)
+        if arr.shape[-1] == 2:
+            return (arr[0].argmax(axis=-1) == 1).astype(np.uint8)
+        if arr.shape[1] == 1:
+            arr = arr[0, 0]
+        else:
+            raise ValueError(f"Unsupported segmentation channels: {arr.shape}")
+    elif arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"Unsupported segmentation output: {arr.shape}")
+    if np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
+        return (arr > 0).astype(np.uint8)
+    return (arr >= (0.5 if np.nanmin(arr) >= 0.0 and np.nanmax(arr) <= 1.0 else 0.0)).astype(np.uint8)
+
+
 class Segmenter:
     def __init__(self, model_path: Path):
         import onnxruntime as ort
@@ -67,15 +91,17 @@ class Segmenter:
             )
         self.path = model_path
         self.sha = sha256(model_path)
+        self.kind = "paddleseg" if "ppliteseg" in model_path.stem.lower() else "lraspp"
         metadata = model_path.with_suffix(model_path.suffix + ".json")
         if metadata.is_file():
             meta = json.loads(metadata.read_text(encoding="utf-8"))
-            if meta.get("architecture") != "lraspp_mobilenet_v3_large":
-                raise ValueError(
-                    "The preprocessor supports LR-ASPP only; "
-                    f"found segmentation architecture {meta.get('architecture')!r}. "
-                    "Do not treat a PP-LiteSeg model as ImageNet-normalized LR-ASPP."
-                )
+            if self.kind == "lraspp" and meta.get("architecture") != "lraspp_mobilenet_v3_large":
+                raise ValueError(f"Unexpected segmentation architecture {meta.get('architecture')!r}")
+        self.mean, self.std = (
+            (np.full(3, 0.5, np.float32), np.full(3, 0.5, np.float32))
+            if self.kind == "paddleseg" else (MEAN, STD)
+        )
+        self.pad_value = 128 if self.kind == "paddleseg" else 0
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
         self.session = ort.InferenceSession(str(model_path), providers=providers)
         print(f"[segmenter] ONNX Runtime providers: {self.session.get_providers()}", flush=True)
@@ -86,7 +112,7 @@ class Segmenter:
             raise ValueError(f"Expected LR-ASPP static NCHW square input, got {shape}")
         self.size = int(shape[2])
         self.output = self.session.get_outputs()[0].name
-        print(f"[segmenter] LR-ASPP {self.size}x{self.size}, sha256 {self.sha[:16]}...")
+        print(f"[segmenter] {self.kind} {self.size}x{self.size}, sha256 {self.sha[:16]}...")
 
     def mask(self, bgr: np.ndarray) -> np.ndarray:
         height, width = bgr.shape[:2]
@@ -94,16 +120,18 @@ class Segmenter:
         nw, nh = max(1, round(width * scale)), max(1, round(height * scale))
         left, top = (self.size - nw) // 2, (self.size - nh) // 2
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        canvas = np.zeros((self.size, self.size, 3), np.uint8)
+        canvas = np.full((self.size, self.size, 3), self.pad_value, np.uint8)
         canvas[top:top+nh, left:left+nw] = cv2.resize(rgb, (nw, nh))
-        x = (canvas.astype(np.float32) / 255.0 - MEAN) / STD
+        x = (canvas.astype(np.float32) / 255.0 - self.mean) / self.std
         x = x.transpose(2, 0, 1)[None]
-        probability = np.asarray(self.session.run([self.output], {self.input: x})[0])
-        if probability.ndim != 4 or probability.shape[1] != 1:
-            raise ValueError(f"Unexpected segmentation output: {probability.shape}")
-        score = probability[0, 0, top:top+nh, left:left+nw]
-        score = cv2.resize(score, (width, height))
-        binary = (score >= 0.50).astype(np.uint8)
+        raw = np.asarray(self.session.run([self.output], {self.input: x})[0])
+        binary_square = _foreground_from_output(raw)
+        if binary_square.shape != (self.size, self.size):
+            raise ValueError(f"Unexpected segmentation output: {raw.shape}")
+        binary = cv2.resize(
+            binary_square[top:top+nh, left:left+nw].astype(np.uint8),
+            (width, height), interpolation=cv2.INTER_NEAREST,
+        )
         n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         if n < 2:
             raise ValueError("segmenter found no resistor")
