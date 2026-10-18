@@ -86,8 +86,8 @@ class Segmenter:
         import onnxruntime as ort
         if not model_path.is_file():
             raise FileNotFoundError(
-                f"Trained LR-ASPP segmentation ONNX not found: {model_path}. "
-                "Train/export segmentation-v4-lraspp first."
+                f"Trained segmentation ONNX not found: {model_path}. "
+                "Export the chosen LR-ASPP or PP-LiteSeg model before preparing data."
             )
         self.path = model_path
         self.sha = sha256(model_path)
@@ -462,7 +462,7 @@ def process_shard(segmenter, records, shard_index, shard_dir:Path, seed=42, dono
                 cv2.imwrite(str(shard_dir/rel_file),crop,[cv2.IMWRITE_JPEG_QUALITY,94])
                 labels.append({
                     "image":rel_file, "split":split,
-                    "session_id":ann.id, "camera_id":"segsynthetic-lraspp",
+                    "session_id":ann.id, "camera_id":f"segsynthetic-{getattr(segmenter, 'kind', 'lraspp')}",
                     "resistors":[{
                         "id":f"{ann.id}--{name}", "bbox":[0,0,TARGET_HW[1],TARGET_HW[0]],
                         "bands":bands,
