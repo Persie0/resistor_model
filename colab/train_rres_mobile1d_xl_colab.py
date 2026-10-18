@@ -1,4 +1,4 @@
-"""Train a >20x-capacity BandNet Mobile1D XL without overwriting the small model.
+"""Train a ~25 MB FP32 BandNet Mobile1D XL without overwriting the small model.
 
 Run this file from the companion Colab notebook with a Tesla T4 or better.
 The original Mobile1D run stays under r1-mobile1d-colab, including all weights.
@@ -135,7 +135,7 @@ def main() -> None:
     configure_xl(base)
     print(
         "[mobile1d-xl] separate high-capacity run: 120 epochs, "
-        "48 base channels, 640 feature channels, batch 8",
+        f"48 base channels, {XL_FEATURES} feature channels, batch {XL_BATCH_SIZE}",
         flush=True,
     )
     base.main()
