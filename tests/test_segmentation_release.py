@@ -134,7 +134,7 @@ def test_does_not_overwrite_custom_incomplete_onnx(monkeypatch, tmp_path):
     _fake_asset(monkeypatch,tmp_path,"lraspp",{
         filename:raw, filename+".data":struct.pack("<f",2.0),
     })
-    dest=tmp_path/"drive"/"segmentation-lraspp"/filename
+    dest=tmp_path/"drive"/"segmentation-v4-lraspp"/filename
     dest.parent.mkdir(parents=True)
     dest.write_bytes(raw)
     with pytest.raises(FileNotFoundError, match="custom ONNX"):
@@ -152,7 +152,7 @@ def test_missing_external_file_in_release_is_fatal(monkeypatch, tmp_path):
 
 def test_self_contained_custom_model_does_not_need_release(monkeypatch, tmp_path):
     filename="resistor_segmenter_lraspp.onnx"
-    dest=tmp_path/"drive"/"segmentation-lraspp"/filename
+    dest=tmp_path/"drive"/"segmentation-v4-lraspp"/filename
     dest.parent.mkdir(parents=True)
     dest.write_bytes(_onnx_bytes(filename,external=False))
     monkeypatch.setattr(release, "_download_and_verify", lambda *a: pytest.fail("network"))
