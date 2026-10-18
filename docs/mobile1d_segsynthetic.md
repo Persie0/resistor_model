@@ -8,7 +8,8 @@ Two Google Colab notebooks implement the full **data synthesis → deployed segm
 ## Inputs
 
 - The original three COCO datasets are restored from the checksummed cache under `MyDrive/resistor_model/r1-mobile1d-colab/`.
-- A **trained** `segmentation-v4-lraspp/resistor_segmenter_lraspp.onnx` is required in Google Drive. The crop/segmentation recipe uses ImageNet RGB normalization, letterboxing and the LR-ASPP single-channel foreground probability output. It does **not** silently substitute PaddleSeg PP-LiteSeg, which has different preprocessing. Export LR-ASPP first if missing.
+- A **trained segmentation ONNX** is required in Google Drive. The default is `segmentation-v4-lraspp/resistor_segmenter_lraspp.onnx` (384×384, ImageNet normalization, one-channel probability).
+- To use the trained **PP-LiteSeg** export instead, set `os.environ["MOBILE1D_SEGMENTER_ONNX"] = "/content/drive/MyDrive/resistor_model/segmentation-pp-liteseg/resistor_segmenter_ppliteseg.onnx"` in notebook 1 **before** its `from resistor_model.tools.mobile1d_segsynthetic import ...` import. This uses PaddleSeg normalization (mean/std 0.5), gray padding and two-channel logits decoding, rather than LR-ASPP preprocessing. The exact ONNX SHA is recorded in every shard's recipe; changing segmenters invalidates/rebuilds the synthesis cache.
 - Original resistor-band colors, boxes and grouped split assignments must be available from the source manifest and `splits.json`.
 
 ## Synthesis
