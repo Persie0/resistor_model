@@ -196,3 +196,25 @@ def test_band_count_sampler_keeps_synthetic_six_band_from_dominating():
     total = sum(by_count.values())
     assert {k: v / total for k,v in by_count.items()} == pytest.approx(requested)
     assert _balanced_band_count_sampler(dataset, None, seed=42) is None
+
+
+def test_segmentation_output_supports_lraspp_and_paddleseg():
+    positive=np.zeros((1,1,8,10),np.float32)
+    positive[0,0,2:5,3:7]=0.95
+    decoded=syn._foreground_from_output(positive)
+    assert decoded.shape==(8,10)
+    assert decoded.sum()==12
+
+    logits=np.zeros((1,2,8,10),np.float32)
+    logits[:,0]=0.6
+    logits[:,1,2:5,3:7]=1.4
+    decoded=syn._foreground_from_output(logits)
+    assert decoded.shape==(8,10)
+    assert decoded.sum()==12
+
+    binary=np.zeros((1,1,8,10),np.int64)
+    binary[0,0,2:5,3:7]=1
+    assert syn._foreground_from_output(binary).sum()==12
+
+    with pytest.raises(ValueError,match="Unsupported"):
+        syn._foreground_from_output(np.zeros((1,4,8,10),np.float32))
