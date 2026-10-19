@@ -4,6 +4,7 @@ on:
     paths:
       - "src/resistor_model/**"
       - "colab/train_rres_mobile1d*"
+      - "colab/prepare_mobile1d_segsynthetic_colab.ipynb"
       - "tests/test_mobile1d*"
       - "tests/test_training_lr_extension.py"
 
