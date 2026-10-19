@@ -200,3 +200,19 @@ def test_download_rejects_wrong_hash_and_incomplete_transfer(monkeypatch, tmp_pa
 def test_unknown_choice_fails_without_network(tmp_path):
     with pytest.raises(ValueError, match="Unknown segmenter"):
         release.ensure_segmentation_onnx("other", tmp_path)
+
+
+def test_colab_preparation_cell_refreshes_stale_segmentation_imports():
+    """Colab reuses sys.modules across reruns even when git clone is refreshed."""
+    notebook = Path(__file__).resolve().parents[1] / "colab" / "prepare_mobile1d_segsynthetic_colab.ipynb"
+    obj = json.loads(notebook.read_text(encoding="utf-8"))
+    cells = [c for c in obj["cells"] if c["cell_type"] == "code"]
+    source = "".join(cells[0]["source"])
+    # Catch invalid notebook code before Colab spends minutes downloading data.
+    compile(source, str(notebook) + ":main", "exec")
+    eviction = source.index("del sys.modules[stale_name]")
+    loader_import = source.index("import resistor_model.tools.segmentation_release as segmenter_release")
+    assert eviction < loader_import
+    assert "_missing_external_data" in source
+    assert "expected_loader" in source
+    assert "segmenter_release.ensure_segmentation_onnx" in source
