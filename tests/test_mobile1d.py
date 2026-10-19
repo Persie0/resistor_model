@@ -65,7 +65,8 @@ def test_mobile1d_chroma_toggle_changes_stem():
     assert with_chroma.stem[0].in_channels == 5
     assert without.stem[0].in_channels == 3
     out = without(torch.rand(1, 3, 64, 384))
-    assert out["dense_logits"].shape == (1, 13, 192)
+    # Default Mobile1D now uses 256 dense bins; this is independent of crop width.
+    assert out["dense_logits"].shape == (1, 13, 256)
 
 
 def test_runtime_builds_mobile1d():
